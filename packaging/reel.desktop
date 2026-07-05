@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=reel
+GenericName=Footage Manager
+Comment=Ingest, review, cut, and back up trip footage
+Exec=reel
+Icon=reel
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;
+Keywords=video;footage;clips;trip;dji;gopro;cut;
+StartupNotify=true
+StartupWMClass=reel
