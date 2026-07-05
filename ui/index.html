@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>reel</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="topbar" data-tauri-drag-region>
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-name">reel</span>
+      </div>
+      <p class="summary" id="summary"></p>
+      <button class="btn ghost" id="refresh" type="button">
+        <span class="btn-ico" aria-hidden="true">↻</span> Rescan
+      </button>
+    </header>
+
+    <main id="app">
+      <section id="card-panel" aria-label="Inserted card"></section>
+
+      <section id="trips-panel">
+        <div class="panel-head">
+          <h2 class="heading">Trips</h2>
+          <span class="panel-sub" id="trips-sub"></span>
+        </div>
+        <div id="trips" class="trip-grid"></div>
+      </section>
+    </main>
+
+    <dialog id="import-dialog" class="dialog" aria-labelledby="import-title">
+      <form method="dialog" class="import-form">
+        <div class="dialog-head">
+          <h2 class="dialog-title" id="import-title">Import session</h2>
+          <p class="dialog-meta tnum" id="import-meta"></p>
+        </div>
+
+        <div class="field">
+          <label class="field-label" for="import-trip">Into trip</label>
+          <input
+            class="input"
+            id="import-trip"
+            type="text"
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+            placeholder="trip name"
+          />
+          <p class="field-hint" id="import-hint"></p>
+          <div class="trip-picks" id="import-picks" hidden></div>
+        </div>
+
+        <div class="import-progress" id="import-progress" hidden>
+          <div class="imp-row">
+            <span class="imp-file" id="imp-file"></span>
+            <span class="imp-pct tnum" id="imp-pct"></span>
+          </div>
+          <div class="bar"><div class="bar-fill" id="imp-bar"></div></div>
+        </div>
+
+        <p class="dialog-error" id="import-error" role="alert" hidden></p>
+
+        <div class="dialog-foot">
+          <button class="btn ghost" type="button" id="import-cancel">Cancel</button>
+          <button class="btn primary" type="button" id="import-go">Import</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="confirm-dialog" class="dialog" aria-labelledby="confirm-title">
+      <form method="dialog" class="import-form">
+        <div class="dialog-head">
+          <h2 class="dialog-title" id="confirm-title"></h2>
+          <p class="dialog-meta" id="confirm-meta"></p>
+        </div>
+
+        <div class="import-progress" id="confirm-check">
+          <div class="imp-row">
+            <span class="imp-file" id="confirm-stage">Checking the pool…</span>
+            <span class="imp-pct tnum" id="confirm-count"></span>
+          </div>
+          <div class="bar"><div class="bar-fill" id="confirm-bar"></div></div>
+        </div>
+
+        <p class="confirm-summary" id="confirm-summary" hidden></p>
+        <p class="dialog-error" id="confirm-error" role="alert" hidden></p>
+
+        <div class="dialog-foot">
+          <button class="btn ghost" type="button" id="confirm-cancel">Cancel</button>
+          <button class="btn danger" type="button" id="confirm-go" disabled></button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Review / player: a full-screen cutting room, shown over the dashboard -->
+    <section id="player" class="player" hidden aria-label="Review">
+      <header class="player-head" data-tauri-drag-region>
+        <button class="btn ghost small" id="player-back" type="button">
+          <span class="btn-ico" aria-hidden="true">←</span> Trips
+        </button>
+        <div class="player-id">
+          <span class="player-trip" id="player-trip"></span>
+          <span class="player-clip tnum" id="player-clip"></span>
+        </div>
+        <div class="player-tools">
+          <button class="src-tag" id="player-proxy" type="button" hidden></button>
+          <span class="player-mark-count tnum" id="player-mark-count"></span>
+          <button class="btn ghost small" id="player-list" type="button">Marks</button>
+        </div>
+      </header>
+
+      <div class="player-main">
+        <div class="stage" id="stage">
+          <video id="video" playsinline preload="auto"></video>
+          <div class="stage-over" id="stage-over" hidden></div>
+        </div>
+        <aside class="marks-panel" id="marks-panel" hidden>
+          <div class="marks-head">
+            <span class="marks-title">Marks</span>
+            <span class="marks-sub" id="marks-sub"></span>
+          </div>
+          <div class="marks-list" id="marks-list"></div>
+          <p class="marks-empty" id="marks-empty">
+            No marks yet. Press <kbd>i</kbd> to set an in-point, <kbd>o</kbd> to
+            close the segment, or <kbd>h</kbd> to grab a highlight.
+          </p>
+        </aside>
+      </div>
+
+      <footer class="player-foot">
+        <div class="transport">
+          <button class="iconbtn play" id="play" type="button" aria-label="Play / pause"></button>
+          <span class="time tnum" id="time">0:00 / 0:00</span>
+          <div class="scrub" id="scrub" role="slider" tabindex="-1" aria-label="Seek">
+            <div class="scrub-track">
+              <div class="scrub-played" id="scrub-played"></div>
+              <div class="scrub-marks" id="scrub-marks"></div>
+              <div class="scrub-pending" id="scrub-pending" hidden></div>
+              <div class="scrub-head" id="scrub-head"></div>
+            </div>
+          </div>
+        </div>
+        <div class="keyhints" id="keyhints" aria-hidden="true">
+          <span class="kh"><kbd>i</kbd>in</span>
+          <span class="kh" id="hint-out"><kbd>o</kbd>out</span>
+          <span class="kh"><kbd>h</kbd>highlight</span>
+          <span class="kh"><kbd>e</kbd>label</span>
+          <span class="kh"><kbd>u</kbd>undo</span>
+          <span class="kh"><kbd>⌫</kbd>delete</span>
+          <span class="kh-sep"></span>
+          <span class="kh"><kbd>space</kbd>play</span>
+          <span class="kh"><kbd>j</kbd><kbd>k</kbd><kbd>l</kbd>shuttle</span>
+          <span class="kh"><kbd>home</kbd><kbd>end</kbd>clip ends</span>
+          <span class="kh"><kbd>Ctrl</kbd><kbd>space</kbd>play zone</span>
+          <span class="kh-sep"></span>
+          <span class="kh"><kbd>←</kbd><kbd>→</kbd>seek</span>
+          <span class="kh"><kbd>[</kbd><kbd>]</kbd>clip</span>
+          <span class="kh"><kbd>Ctrl</kbd><kbd>←</kbd><kbd>→</kbd>mark</span>
+          <span class="kh"><kbd>x</kbd>marks</span>
+        </div>
+        <div class="filmstrip" id="filmstrip"></div>
+      </footer>
+    </section>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    <script src="app.js" defer></script>
+  </body>
+</html>

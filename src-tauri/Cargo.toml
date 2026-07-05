@@ -1,0 +1,22 @@
+[package]
+name = "reel-tauri"
+description = "reel — manage trip footage: ingest, review, cut, back up."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "reel"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2" }
+
+[dependencies]
+tauri = { version = "2" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reel-core = { path = "../crates/reel-core" }
+# Loopback HTTP server for <video>. WebKitGTK's media backend can't load a
+# custom URI scheme (WebKit bug 146351), but it plays http://127.0.0.1 fine.
+tiny_http = "0.12"

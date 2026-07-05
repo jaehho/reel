@@ -1,0 +1,7 @@
+/target
+/src-tauri/target
+node_modules
+/src-tauri/gen
+
+# impeccable design-hook local cache (machine-local, session-keyed)
+.impeccable/
