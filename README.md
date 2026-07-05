@@ -5,7 +5,17 @@ into per-trip workspaces, review and mark, cut, and push to a shared pool.
 Successor to the `reel` shell script (`bin/.local/bin/reel`), which stays usable
 during the port.
 
-## Run it
+## Install
+
+Arch (AUR) — also pulled in by the dotfiles `make sync`:
+
+```sh
+paru -S reel-git
+```
+
+Puts `reel` on `PATH` and adds a launcher entry.
+
+## Run it (from source)
 
 ```sh
 make run      # launch the app (debug)   — needs only cargo (UI is embedded)
@@ -14,8 +24,9 @@ make dump     # print what the engine sees right now (trips + inserted card)
 make build    # optimized release binary -> target/release/reel
 ```
 
-No npm or tauri-cli needed to run — the static frontend is embedded at compile
-time. They only come in for release bundling (a later phase).
+No npm or tauri-cli needed — the static frontend is embedded at compile time, so
+a plain `cargo build` produces the shipping binary too (the AUR recipe in
+`packaging/` builds exactly this way).
 
 ## Layout
 
@@ -59,7 +70,10 @@ The engine honours the same env knobs as the script (`REEL_LIB`, `REEL_REMOTE`,
   its local raw once every master is in the pool, keeping clips/marks). Both gate
   a live pool check behind an explicit confirm; card deletes are guarded to card
   paths, and archive re-verifies before freeing the only local copies.
-- [ ] **5 — Packaging** (.desktop, AUR like hypr-tools), `make sync`.
+- [x] **5 — Packaging**: `reel-git` on the AUR (plain `cargo build` — the frontend
+  embeds, so no tauri-cli/npm), a `.desktop` launcher + icons, and a
+  `packages/arch.txt` entry so the dotfiles `make sync` installs it. Recipe and
+  publish/update flow in `packaging/`.
 
 Poster-frame **thumbnails** (ffmpeg, cached by content id) and a **black-and-
 white, per-trip-colour redesign** (see `PRODUCT.md`) landed ahead of Phase 5:
@@ -69,5 +83,5 @@ footage. Each trip also shows **what's yours vs. pulled from others** (by
 `share=` line, shown as "unknown" until a verified push records it.
 
 Import, Review, Cut, Share, card reclaim, and archive now work in the GUI; the
-only step still on the `reel` script is opening a finished cut in an editor. Not
-yet wired into the dotfiles `make sync`.
+only step still on the `reel` script is opening a finished cut in an editor.
+Packaged on the AUR as `reel-git` and installed by the dotfiles `make sync`.
