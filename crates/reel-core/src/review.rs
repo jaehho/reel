@@ -130,10 +130,14 @@ pub fn review_playlist(cfg: &Config, trip: &str) -> Result<Playlist, String> {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| quick_fileid(m));
             // Provenance: the person folder this master sits in (`<trip>/<person>/…`).
+            // Via `parent()`, so a stray at the trip root gets no badge rather
+            // than one naming itself.
             let person = m
                 .strip_prefix(&dir)
                 .ok()
-                .and_then(|r| r.components().next())
+                .and_then(|r| r.parent().map(|p| p.to_path_buf()))
+                .as_deref()
+                .and_then(|p| p.components().next())
                 .and_then(|c| c.as_os_str().to_str())
                 .unwrap_or("")
                 .to_string();

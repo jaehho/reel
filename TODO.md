@@ -732,3 +732,38 @@ the oversized file is never set aside; escaping weakened → the record splits).
 - `thumb` still swallows its join error (returns None → placeholder). Lower
   stakes than the other three, but the same shape.
 - No session id, so interleaved runs are only separable by the start line.
+
+## `person/file` clips: the filename became a directory
+
+Same class as `sync::rel_of`, found while that one was fresh, but this one
+reshapes the library on disk rather than just misreporting.
+
+`organize::person_camera` read the **second** path component as "the camera" —
+the shape reel's own import writes (`person/camera/base`). But `pull` copies a
+friend's cloud folder down verbatim, and a friend with no camera level has
+`person/base`. For those, the *filename* was taken as the camera, so a move
+built `alice/CLIP_0050.MP4/CLIP_0050.MP4`: a directory named after the clip with
+the clip inside it, that bogus rel written into the baseline, and the same
+nesting replayed at the cloud via `rclone moveto`. Every one of the 303 pulled
+clips from Tyler and jack is this shape.
+
+It also silently truncated anything *deeper* than two levels onto
+`person/camera`, which can land two distinct clips on one destination path.
+
+Fixed by taking the master's whole parent directory instead of two fixed levels
+(`owner_and_subdir`), so the subpath rides along at whatever depth it arrived in.
+`None` for a stray at the trip root, which has no owner and no provenance.
+
+Two more readers of the same "first component is the owner" assumption were wrong
+for a stray at the trip root, where the first component *is* the filename:
+- `trips::person_of` — its doc already claimed `None` for a stray while returning
+  `Some(filename)`, which put a filename in the contributor list. Fixed.
+- `review.rs` — showed a filename as the provenance badge. Fixed.
+
+2 tests, both confirmed to fail against the old two-level logic.
+
+### Deliberately not fixed: `remove::rel_of`
+Same shape, but its caller does `else { continue }`, so returning `None` for a
+stray would make that clip **undeletable** — a worse failure than a wrong label.
+Correct fix is to handle a stray explicitly (delete locally, no cloud path)
+rather than to tighten the reader. Left alone until that's designed.

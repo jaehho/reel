@@ -5,8 +5,9 @@
 //! does all five together:
 //!   - **files** — the master, its native `.LRF`/`.LRV`/`.THM`, any cached
 //!     `.proxies/` proxy, and any cut `clips/*` derived from it, all moved as a
-//!     unit. The `<person>/<camera>` subpath is preserved, so provenance and the
-//!     cloud layout ride along unchanged.
+//!     unit. Whatever subpath the master sits under is preserved verbatim —
+//!     `<person>/<camera>` from our own import, plain `<person>` from a friend's
+//!     pull — so provenance and the cloud layout ride along unchanged.
 //!   - **ledger** — each moved clip's `trip` is rewritten, so dedup and card
 //!     reclaim keep pointing at the real owner.
 //!   - **marks** — segments keyed on a moved master migrate to the destination
@@ -70,14 +71,29 @@ fn trip_of(lib: &Path, master: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-/// `person/camera` for a master under `trip_dir` (`<trip>/<person>/<camera>/file`)
-/// — the subpath preserved across a move so provenance and cloud paths hold.
-fn person_camera(master: &Path, trip_dir: &Path) -> Option<(String, String)> {
+/// The owner folder and the whole sub-directory a master sits in under
+/// `trip_dir`: `alice/gopro/CLIP.MP4` → `("alice", "alice/gopro")`. The sub-path
+/// rides along across a move, so provenance and cloud paths hold.
+///
+/// This used to hard-code exactly two levels and read the second component as
+/// "the camera" — the shape reel's own import writes. But `pull` copies a
+/// friend's cloud folder down verbatim, and a friend whose footage sits at
+/// `person/file` (no camera level) had the **filename** taken as the camera. The
+/// move then built `alice/CLIP.MP4/CLIP.MP4`: a directory named after the clip
+/// with the clip inside it, that bogus rel written into the baseline, and the
+/// same nesting replayed at the cloud. Same reader-stricter-than-the-writer bug
+/// as `sync::rel_of`, but this one reshapes the library on disk.
+///
+/// Taking the directory whole also stops anything deeper than two levels being
+/// silently flattened onto `person/camera`, which could land two distinct clips
+/// on one destination path.
+///
+/// `None` for a master loose in the trip root — no owner folder, no provenance.
+fn owner_and_subdir(master: &Path, trip_dir: &Path) -> Option<(String, String)> {
     let rel = master.strip_prefix(trip_dir).ok()?;
-    let mut it = rel.components();
-    let person = it.next()?.as_os_str().to_str()?.to_string();
-    let camera = it.next()?.as_os_str().to_str()?.to_string();
-    Some((person, camera))
+    let dir = rel.parent()?; // "" for a stray, so the owner lookup below fails
+    let owner = dir.components().next()?.as_os_str().to_str()?.to_string();
+    Some((owner, dir.to_str()?.replace('\\', "/")))
 }
 
 /// Move a file, preferring a rename (same filesystem — the whole library is one
@@ -161,7 +177,7 @@ struct Plan {
     src_trip: String,
     master_src: PathBuf,
     master_dst: PathBuf,
-    rel: String,       // person/camera/base — the cloud-relative path
+    rel: String,       // <subdir>/base, whatever its depth — the cloud-relative path
     stem: String,      // rel_stem, for proxies/clips
     needs_cloud: bool, // this clip has a copy in the cloud that must follow
     old_abs: String,   // marks key on this
@@ -194,12 +210,12 @@ pub fn move_clips(cfg: &Config, masters: &[String], dest: &str) -> Result<MoveRe
             continue;
         }
         let src_dir = cfg.lib.join(&src_trip);
-        let Some((person, camera)) = person_camera(&src, &src_dir) else {
+        let Some((person, subdir)) = owner_and_subdir(&src, &src_dir) else {
             continue;
         };
         let base = src.file_name().and_then(|s| s.to_str()).unwrap_or_default();
-        let rel = format!("{person}/{camera}/{base}");
-        let master_dst = dst_dir.join(&person).join(&camera).join(base);
+        let rel = format!("{subdir}/{base}");
+        let master_dst = dst_dir.join(&subdir).join(base);
         if master_dst.exists() {
             skipped += 1; // the destination already owns this clip
             continue;

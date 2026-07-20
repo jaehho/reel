@@ -1652,6 +1652,61 @@ fn edit_errs_on_empty_or_bogus_trip() {
 
 // ---- organize: move clips, rename, merge ----
 
+/// A friend's footage pulled down as `person/file` (no camera level) used to have
+/// its *filename* read as the camera folder, so the move built
+/// `alice/CLIP.MP4/CLIP.MP4` — a directory named after the clip, with the clip
+/// inside it — and wrote that shape into the baseline and the cloud.
+#[test]
+fn moving_a_friends_clip_with_no_camera_folder_keeps_its_shape() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    let a = make_trip(&lib, "a");
+    make_trip(&lib, "b");
+
+    // two components, the shape `pull` writes for a friend with no camera level
+    let master = a.join("alice/CLIP_0050.MP4");
+    touch(&master, 2, 1_000_000, 1_700_000_000);
+
+    let c = cfg(&lib, &state, None);
+    let r = reel_core::move_clips(&c, &[master.display().to_string()], "b").expect("move ok");
+    assert_eq!(r.moved, 1);
+
+    assert!(!master.exists(), "gone from source");
+    assert!(
+        lib.join("b/alice/CLIP_0050.MP4").is_file(),
+        "lands at person/file, the shape it arrived in"
+    );
+    assert!(
+        !lib.join("b/alice/CLIP_0050.MP4/CLIP_0050.MP4").exists(),
+        "the filename must never become a directory"
+    );
+}
+
+/// Anything deeper than `person/camera` was truncated onto those two levels,
+/// which can drop two distinct clips onto one destination path.
+#[test]
+fn a_deeper_subpath_survives_a_move_intact() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    let a = make_trip(&lib, "a");
+    make_trip(&lib, "b");
+
+    let master = a.join("jaeho/dji/day2/DJI_0007.MP4");
+    touch(&master, 3, 1_000_000, 1_700_000_000);
+
+    let c = cfg(&lib, &state, None);
+    let r = reel_core::move_clips(&c, &[master.display().to_string()], "b").expect("move ok");
+    assert_eq!(r.moved, 1);
+    assert!(
+        lib.join("b/jaeho/dji/day2/DJI_0007.MP4").is_file(),
+        "the whole subpath rides along, not just the first two levels"
+    );
+}
+
 #[test]
 fn moves_a_clip_between_trips() {
     let d = tempfile::tempdir().unwrap();

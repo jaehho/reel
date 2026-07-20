@@ -94,9 +94,11 @@ pub fn trip_shares(cfg: &Config) -> HashMap<String, Share> {
 /// The person a master belongs to: the first path segment under the trip dir
 /// (`<trip>/<person>/<camera>/file`). `None` for a stray master at the root.
 fn person_of(master: &Path, trip: &Path) -> Option<String> {
-    master
-        .strip_prefix(trip)
-        .ok()?
+    let rel = master.strip_prefix(trip).ok()?;
+    // The first component is only an owner if the master is actually nested —
+    // on a stray at the trip root it *is* the filename, which the contributor
+    // list then showed as a person.
+    rel.parent()?
         .components()
         .next()
         .and_then(|c| c.as_os_str().to_str())
