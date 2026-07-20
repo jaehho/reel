@@ -305,6 +305,36 @@ main {
   display: flex;
   gap: 4px;
   flex: none;
+  position: relative;
+  cursor: pointer;
+  border-radius: var(--radius-xs);
+}
+/* A play overlay over the contact strip: click the footage to preview the
+   session before importing. Hidden until hover/focus so the frames read clean. */
+.strip-play {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: inherit;
+  background: color-mix(in oklab, #000 32%, transparent);
+  opacity: 0;
+  transition: opacity 0.18s var(--ease);
+  pointer-events: none;
+}
+.strip-play svg {
+  width: 24px;
+  height: 24px;
+  fill: #fff;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.55));
+}
+.strip:hover .strip-play,
+.strip:focus-visible .strip-play {
+  opacity: 1;
+}
+.strip:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
 }
 .frame {
   width: 58px;
@@ -358,6 +388,11 @@ main {
   flex: none;
   margin-left: auto;
 }
+/* "Share to clear" pushes the owning trip from here — give the inline progress
+   enough width for the bytes / rate / ETA readout (the row wraps if tight). */
+.session .actions .share-prog {
+  min-width: 260px;
+}
 
 /* ---- chips ---- */
 .chip {
@@ -392,6 +427,37 @@ main {
   background: var(--surface-2);
   color: var(--faint);
 }
+/* Sharing chip — clickable, opens the Sharing panel. When shared it's tinted with
+   the trip's own colour (ties it to the card); the ".share-cta" (shared-with-
+   nobody) variant stays muted until hover, so it's a quiet call-to-action. */
+.chip.share-chip {
+  cursor: pointer;
+  background: color-mix(in oklab, var(--tc, var(--text)) 16%, transparent);
+  color: var(--text);
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.chip.share-chip.share-cta {
+  background: var(--surface-2);
+  color: var(--muted);
+}
+.chip.share-chip:hover,
+.chip.share-chip:focus-visible {
+  background: color-mix(in oklab, var(--tc, var(--text)) 30%, transparent);
+  color: var(--text);
+  outline: none;
+}
+/* A sync chip that names actual drift ("10 to clean", "3 to share") opens the Sync
+   panel. It keeps its status colour — the hover just says it's clickable. */
+.chip.chip-action {
+  cursor: pointer;
+  transition: filter 0.12s ease, box-shadow 0.12s ease;
+}
+.chip.chip-action:hover,
+.chip.chip-action:focus-visible {
+  filter: brightness(1.18);
+  box-shadow: 0 0 0 1px color-mix(in oklab, currentColor 45%, transparent);
+  outline: none;
+}
 
 /* ---- trips ---- */
 .trip-grid {
@@ -422,6 +488,47 @@ main {
   transform: translateY(-2px);
   box-shadow: var(--shadow), 0 0 0 1px var(--tc),
     0 16px 38px color-mix(in oklab, var(--tc) 32%, transparent);
+}
+/* loading placeholders while the scan runs */
+.trip.skeleton {
+  --tc: var(--line-soft);
+  pointer-events: none;
+}
+.trip.skeleton:hover {
+  transform: none;
+  border-color: var(--line);
+  box-shadow: var(--shadow);
+}
+.skel-body {
+  padding: 16px;
+}
+.skel-line {
+  height: 11px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  margin: 12px 0;
+}
+.skel-line.w40 {
+  width: 40%;
+}
+.skel-line.w70 {
+  width: 70%;
+}
+.skel-line.w85 {
+  width: 85%;
+}
+.trip.skeleton .cover-wrap,
+.skel-line {
+  animation: skel-pulse 1.3s ease-in-out infinite;
+}
+@keyframes skel-pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 0.9;
+  }
 }
 .cover-wrap {
   position: relative;
@@ -545,7 +652,7 @@ main {
   gap: 8px;
 }
 
-/* ---- share (push to pool): inline progress on the trip card ---- */
+/* ---- share (push to cloud): inline progress on the trip card ---- */
 .share-prog {
   flex: 1 1 100%;
   display: flex;
@@ -578,6 +685,47 @@ main {
   color: var(--warn);
   font-size: 12px;
   line-height: 1.4;
+}
+
+/* ---- share queue ---- */
+/* "Share all" sits at the right edge of the Trips heading. */
+.share-all-slot {
+  margin-left: auto;
+}
+/* A trip/session waiting its turn in the share queue: a muted placeholder with a ✕
+   to drop it, sized like the progress bar so the row doesn't jump when it starts. */
+.share-queued {
+  flex: 1 1 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.session .actions .share-queued {
+  min-width: 260px;
+}
+.queued-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.queued-cancel {
+  flex: none;
+  border: none;
+  background: none;
+  color: var(--faint);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 6px;
+}
+.queued-cancel:hover {
+  color: var(--text);
+  background: color-mix(in oklab, var(--tc) 14%, transparent);
 }
 
 /* ---- state badge (neutral; the trip's colour carries identity instead) ---- */
@@ -817,9 +965,24 @@ main {
 .dialog-foot {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 10px;
 }
-/* destructive-confirm: the plan readout once the pool check clears */
+/* A de-emphasised secondary action (e.g. clear-offline): quiet until hovered, so
+   it reads as an escape hatch rather than a main choice. */
+.btn.subtle {
+  color: var(--faint);
+  opacity: 0.8;
+}
+.btn.subtle:hover {
+  color: var(--text);
+  opacity: 1;
+}
+/* In the confirm dialog it sits apart on the left, away from Cancel / the danger button. */
+.dialog-foot .btn.subtle {
+  margin-right: auto;
+}
+/* destructive-confirm: the plan readout once the cloud check clears */
 .confirm-summary {
   color: var(--text);
   font-size: 13px;
@@ -957,6 +1120,15 @@ body.reviewing {
   background: var(--raise);
   color: var(--text);
 }
+/* Card preview is read-only — hide the mark/move/delete/marks controls. The
+   source (proxy/master) tag and transport stay; card footage isn't a trip. */
+#player.preview #player-mark-count,
+#player.preview #player-move,
+#player.preview #player-trash,
+#player.preview #player-list,
+#player.preview .edit-hint {
+  display: none;
+}
 
 .player-main {
   flex: 1;
@@ -975,17 +1147,46 @@ body.reviewing {
   justify-content: center;
   padding: 16px;
   background: #000;
+  overflow: hidden; /* a zoomed clip is clipped to the stage, not spilled over the UI */
+}
+/* Pinch / ctrl-wheel scales the clip itself (see the zoom block in app.js), so the
+   media carries a transform and the app never zooms. */
+.stage.zoomed {
+  cursor: grab;
+}
+.stage.zoomed.panning {
+  cursor: grabbing;
 }
 /* Size the element to the footage's own aspect (max-*, no forced 100%) so its
    bounds are always visible — a portrait or very dark clip reads as a framed
    video, not a black shape floating in a black stage. */
-.stage video {
+.stage video,
+.stage .stage-photo {
   max-width: 100%;
   max-height: 100%;
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-xs);
   background: #000;
   box-shadow: 0 10px 44px rgb(0 0 0 / 0.55);
+  transform-origin: center center; /* zoom grows from the middle, then pans */
+  will-change: transform;
+}
+.stage .stage-photo {
+  object-fit: contain; /* a wide panorama fits the stage without cropping */
+}
+/* Only one is on stage at a time — hide the idle, src-less <video> behind a photo. */
+#player.photo .stage video {
+  display: none;
+}
+/* A photo has no timeline: hide the transport (play/scrub/time), the key hints,
+   and the mark controls — leaving the stage and the filmstrip to step through.
+   Move/delete stay in the header — a photo is a capture you can relocate or
+   discard like any other. */
+#player.photo .transport,
+#player.photo .keyhints,
+#player.photo #player-mark-count,
+#player.photo #player-list {
+  display: none;
 }
 .stage-over {
   position: absolute;
@@ -1006,6 +1207,14 @@ body.reviewing {
 }
 .stage-over.err .stage-msg {
   color: var(--warn);
+}
+/* The "what this file actually is" line under an unplayable clip's message. */
+.stage-sub {
+  font-size: 12.5px;
+  color: var(--muted);
+  max-width: 56ch;
+  line-height: 1.5;
+  margin-top: -6px;
 }
 .spinner {
   width: 30px;
@@ -1387,6 +1596,736 @@ body.reviewing {
   background: var(--tc);
 }
 
+/* ---- provenance badge (player) + delete affordance ---- */
+.who-badge {
+  flex: none;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  border: 1px solid var(--line-soft);
+  white-space: nowrap;
+}
+/* a pulled clip's owner reads in the trip's colour — an identity, not a warning */
+.who-badge:not(.mine) {
+  color: var(--tc);
+  background: color-mix(in oklab, var(--tc) 14%, transparent);
+  border-color: color-mix(in oklab, var(--tc) 40%, transparent);
+}
+.iconbtn.ghost {
+  width: 34px;
+  height: 34px;
+  background: transparent;
+}
+.iconbtn.trash svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.iconbtn.trash:hover {
+  color: var(--warn);
+  background: var(--warn-dim);
+  border-color: color-mix(in oklab, var(--warn) 36%, transparent);
+}
+
+/* ---- trip ⋯ menu ---- */
+.trip-name-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.trip-menu {
+  flex: none;
+  font: inherit;
+  font-size: 17px;
+  line-height: 1;
+  letter-spacing: 1px;
+  cursor: pointer;
+  color: var(--faint);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  padding: 1px 8px;
+  transition: color 0.14s var(--ease), background 0.14s var(--ease), border-color 0.14s var(--ease);
+}
+.trip-menu:hover {
+  color: var(--text);
+  background: var(--surface-2);
+  border-color: var(--line-soft);
+}
+.menu {
+  position: fixed;
+  z-index: 70;
+  min-width: 184px;
+  padding: 6px;
+  background: var(--raise);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow), 0 18px 44px rgb(0 0 0 / 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  animation: dialog-in 0.14s var(--ease);
+}
+.menu-item {
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-xs);
+  padding: 8px 11px;
+}
+.menu-item:hover {
+  background: var(--surface-2);
+}
+.menu-item.danger {
+  color: var(--warn);
+}
+.menu-item.danger:hover {
+  background: var(--warn-dim);
+}
+.menu-sep {
+  height: 1px;
+  background: var(--line-soft);
+  margin: 4px 2px;
+}
+
+/* ---- a ghost button that turns destructive on hover (board Delete) ---- */
+.btn.danger-text {
+  color: var(--muted);
+}
+.btn.danger-text:hover:not([disabled]) {
+  color: var(--warn);
+  background: var(--warn-dim);
+  border-color: color-mix(in oklab, var(--warn) 30%, transparent);
+}
+
+/* ===================== organize board ===================== */
+body.organizing {
+  overflow: hidden;
+}
+.organize {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+.org-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--line-soft);
+  background: color-mix(in oklab, var(--bg) 90%, black);
+}
+.org-id {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.org-title {
+  flex: none;
+  font-family: var(--serif);
+  font-size: 18px;
+  font-weight: 600;
+}
+.org-sub {
+  color: var(--muted);
+  font-size: 13px;
+}
+.org-tools {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.org-selcount {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+/* the board stacks trips vertically; each trip is a full-width row */
+.org-board {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* keyboard focus uses scrollIntoView; leave room so a focused cell never lands
+     flush under a row header (top) or the footer (bottom) — its outline and the
+     trip's name stay visible */
+  scroll-padding: 54px 0 18px;
+}
+.org-lane {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: color-mix(in oklab, var(--tc) 6%, var(--surface));
+  transition: border-color 0.14s var(--ease), background 0.14s var(--ease);
+}
+.org-lane.over {
+  border-color: var(--tc);
+  background: color-mix(in oklab, var(--tc) 15%, var(--surface));
+}
+.org-lane-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.org-lane-id {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+/* the header selects the whole trip — tint its name on hover so that reads */
+.org-lane-id:hover .org-lane-name {
+  color: var(--tc);
+}
+.org-lane-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--tc);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--tc) 22%, transparent);
+  flex: none;
+}
+.org-lane-name {
+  font-family: var(--serif);
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.org-lane-count {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+.org-lane-menu {
+  flex: none;
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 17px;
+  line-height: 1;
+  padding: 2px 7px;
+  border-radius: 6px;
+}
+.org-lane-menu:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+/* clips run in a horizontal strip that scrolls when they overflow the row */
+.org-lane-clips {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  /* horizontal counterpart of the board's scroll-padding — a focused clip keeps
+     a margin from the strip edges, so its outline shows and the next clip peeks */
+  scroll-padding-inline: 30px;
+}
+.org-lane-empty {
+  color: var(--faint);
+  font-size: 12.5px;
+  padding: 14px 6px;
+}
+/* a subtle vertical divider where the capture day changes within a strip */
+.org-day-sep {
+  flex: none;
+  align-self: stretch;
+  width: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding-top: 3px;
+  color: var(--faint);
+  user-select: none;
+}
+.org-day-sep > span {
+  writing-mode: vertical-rl;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.org-day-sep::after {
+  content: "";
+  flex: 1;
+  width: 1px;
+  background: var(--line-soft);
+}
+.org-cell {
+  position: relative;
+  flex: none;
+  width: 150px;
+  cursor: pointer;
+  user-select: none;
+  border: 2px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  overflow: hidden;
+  transition: border-color 0.14s var(--ease);
+}
+.org-cell:hover {
+  border-color: var(--line);
+}
+.org-cell.sel {
+  border-color: var(--tc);
+  box-shadow: 0 0 0 1px var(--tc);
+}
+.org-cell.stub {
+  opacity: 0.5;
+}
+.org-thumb {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  background: var(--surface-2);
+  opacity: 0;
+  transition: opacity 0.35s var(--ease);
+}
+.org-thumb.loaded {
+  opacity: 1;
+}
+.org-who {
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  color: var(--text);
+  background: color-mix(in oklab, var(--bg) 62%, transparent);
+}
+.org-who:not(.mine) {
+  color: var(--tc);
+}
+.org-tick {
+  position: absolute;
+  right: 6px;
+  top: 6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--on-btn);
+  background: var(--tc);
+  opacity: 0;
+  transform: scale(0.8);
+  transition: opacity 0.12s var(--ease), transform 0.12s var(--ease);
+}
+.org-cell.sel .org-tick {
+  opacity: 1;
+  transform: none;
+}
+.org-name {
+  display: block;
+  padding: 7px 9px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+body.org-dragging .org-cell {
+  cursor: grabbing;
+}
+/* the trailing "+ New trip" lane: a dashed drop target that names a fresh trip */
+.org-lane.new {
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+  border-style: dashed;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 550;
+  cursor: pointer;
+}
+.org-lane.new.over {
+  border-color: var(--text);
+  background: var(--surface);
+  color: var(--text);
+}
+/* while dragging, hint every lane as droppable */
+body.org-dragging .org-lane {
+  border-color: var(--line);
+}
+/* keyboard focus cursor — a plain outline, so it reads clearly on a selected
+   (trip-coloured) cell without fighting its border/shadow */
+.org-cell.focus {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+/* keyboard legend, a thin footer bar under the board (reuses .keyhints) */
+.org-keys {
+  flex: none;
+  padding: 8px 16px;
+  border-top: 1px solid var(--line-soft);
+  background: color-mix(in oklab, var(--bg) 92%, black);
+}
+
+/* ---- pull-from-cloud list ---- */
+.pull-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+/* "Add a friend" row in the Sharing panel: a username box + Share button. */
+.share-add {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.share-add .input {
+  flex: 1;
+}
+.share-add .btn {
+  flex: none;
+}
+/* Add-a-friend combobox: a text field + a ▾ that opens a dropdown of people you
+   already share with (seeded network-free from the caches), plus live search. */
+.combo {
+  position: relative;
+  flex: 1;
+}
+.combo .input {
+  width: 100%;
+  padding-right: 30px; /* room for the toggle */
+}
+.combo-toggle {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px;
+  border-radius: var(--radius-xs);
+}
+.combo-toggle:hover {
+  color: var(--text);
+}
+.combo-menu {
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  max-height: 232px;
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--raise);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow), 0 18px 44px rgb(0 0 0 / 0.5);
+  animation: dialog-in 0.12s var(--ease);
+}
+.combo-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px 11px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+}
+.combo-item.active,
+.combo-item:hover {
+  background: var(--surface-2);
+}
+.combo-name {
+  font-weight: 600;
+}
+.combo-sub {
+  color: var(--faint);
+  font-size: 12px;
+}
+.combo-empty {
+  padding: 9px 11px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.pull-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+}
+.pull-who {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.pull-name {
+  font-weight: 600;
+}
+.pull-sub {
+  color: var(--faint);
+  font-size: 12px;
+}
+.pull-act {
+  flex: none;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pull-pct {
+  color: var(--text);
+  font-weight: 600;
+  font-size: 12.5px;
+}
+.pull-bar {
+  flex: 1 1 100%;
+}
+
+/* sync panel: one row per drift bucket, with an opt-in action tick */
+.sync-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+}
+.sync-group-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+/* What ticking this group's box will actually do. Sits above the file list so it
+   reads as a caption for the chip, not as part of the names. */
+.sync-group-hint {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.sync-group-items {
+  color: var(--faint);
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.sync-act {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.sync-act input {
+  accent-color: var(--text);
+  cursor: pointer;
+}
+/* Duplicates panel: one card per group of same-clip copies; a checkbox includes
+   the group, radios pick which copy to keep. */
+.dup-group {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+}
+.dup-group.off {
+  opacity: 0.5;
+}
+.dup-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.dup-head .dup-inc {
+  flex: none;
+  accent-color: var(--text);
+  cursor: pointer;
+}
+.dup-name {
+  flex: 1;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dup-copies {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-left: 24px;
+}
+.dup-copy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.dup-copy input {
+  flex: none;
+  accent-color: var(--text);
+  cursor: pointer;
+}
+.dup-where {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dup-loc {
+  flex: none;
+  margin-left: auto;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.dup-loc.cloud {
+  color: var(--faint);
+}
+.dup-hint {
+  color: var(--faint);
+  font-size: 11.5px;
+  margin-left: 24px;
+}
+.sync-prog {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+.sync-prog-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+/* the current-trip line sits under the overall counter — dimmer, truncating */
+.sync-prog-row.sync-cur {
+  font-size: 12px;
+}
+.sync-prog-row.sync-cur > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* secondary bar (per-trip transfer) reads as subordinate to the overall one */
+.bar.bar-sub {
+  height: 4px;
+  opacity: 0.7;
+}
+/* per-trip running log: each trip a row that ticks from busy → done */
+.sync-log {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  max-height: 190px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12.5px;
+}
+.sync-log:empty {
+  display: none;
+}
+.sync-log li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 2px;
+  color: var(--muted);
+  border-top: 1px solid var(--line);
+}
+.sync-log li:first-child {
+  border-top: 0;
+}
+.sync-log .log-mark {
+  flex: none;
+  width: 1em;
+  text-align: center;
+}
+.sync-log .log-name {
+  flex: 1;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sync-log .log-note {
+  flex: none;
+  font-size: 11.5px;
+}
+/* row states — busy pulses, done/synced settle, failed warns */
+.sync-log li.busy .log-mark {
+  color: var(--tc);
+  animation: skel-pulse 1.1s ease-in-out infinite;
+}
+.sync-log li.done .log-mark {
+  color: var(--tc);
+}
+.sync-log li.synced .log-mark {
+  color: var(--muted);
+}
+.sync-log li.failed .log-mark,
+.sync-log li.failed .log-note {
+  color: var(--warn);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -1396,7 +2335,8 @@ body.reviewing {
   }
   .cover,
   .frame,
-  .film-thumb {
+  .film-thumb,
+  .org-thumb {
     opacity: 1;
   }
   .trip:hover {

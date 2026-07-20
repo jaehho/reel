@@ -1,4 +1,4 @@
-//! Push your raw masters in a trip up to the shared pool with rclone, verify the
+//! Push your raw masters in a trip up to the shared cloud with rclone, verify the
 //! upload, then record `share=shared` in the trip's `.reel`. Pure engine —
 //! progress is reported through a callback, so the GUI streams it without
 //! reel-core taking a UI dep.
@@ -13,11 +13,12 @@ use crate::config::Config;
 use crate::media::masters_in;
 use crate::model::{PushPhase, PushProgress, PushResult};
 use crate::rclone;
+use crate::store::FileSet;
 use crate::trips::set_trip_meta;
 use std::ffi::OsString;
 use std::path::Path;
 
-/// Camera proxies/thumbs sit beside masters but never go to the pool.
+/// Camera proxies/thumbs sit beside masters but never go to the cloud.
 const EXCLUDES: &[&str] = &["*.LRF", "*.LRV", "*.THM"];
 
 fn valid_trip(name: &str) -> bool {
@@ -26,7 +27,7 @@ fn valid_trip(name: &str) -> bool {
 
 /// Build a copy/check arg list: the verb and its flags, then the proxy excludes,
 /// then src and dest. Shared stats flags are added by `rclone::stream`.
-fn pool_args(lead: &[&str], src: &Path, dest: &str) -> Vec<OsString> {
+fn cloud_args(lead: &[&str], src: &Path, dest: &str) -> Vec<OsString> {
     let mut a: Vec<OsString> = lead.iter().map(OsString::from).collect();
     for ex in EXCLUDES {
         a.push("--exclude".into());
@@ -61,10 +62,10 @@ pub fn push_trip(
     rclone::remote_ok(&cfg.remote)?;
     let dest = format!("{}/{}/{}", cfg.remote.trim_end_matches('/'), trip, cfg.user);
 
-    // ---- upload (resumable: rclone skips files already in the pool) ----
+    // ---- upload (resumable: rclone skips files already in the cloud) ----
     let mut uploaded = 0u64;
     let copied = rclone::stream(
-        pool_args(
+        cloud_args(
             &[
                 "copy",
                 "--transfers",
@@ -94,6 +95,9 @@ pub fn push_trip(
                 file,
                 done,
                 total: s["totalBytes"].as_u64().unwrap_or(0),
+                // rclone reports speed/eta as numbers (speed can be fractional).
+                speed: s["speed"].as_f64().unwrap_or(0.0) as u64,
+                eta: s["eta"].as_f64().map(|x| x as i64).unwrap_or(-1),
             });
         },
     )?;
@@ -109,26 +113,50 @@ pub fn push_trip(
         file: String::new(),
         done: 0,
         total: mine.len() as u64,
+        speed: 0,
+        eta: -1,
     });
-    let verified = rclone::stream(pool_args(&["check", "--one-way"], &src, &dest), |v| {
+    let verified = rclone::stream(cloud_args(&["check", "--one-way"], &src, &dest), |v| {
         let s = &v["stats"];
         on(PushProgress {
             phase: PushPhase::Verify,
             file: String::new(),
             done: s["checks"].as_u64().unwrap_or(0),
             total: s["totalChecks"].as_u64().unwrap_or(0),
+            speed: 0,
+            eta: -1,
         });
     })?;
     if !verified {
         return Err(
-            "pool check failed — not marking shared; your local copies are safe. Share again to retry"
+            "cloud check failed — not marking shared; your local copies are safe. Share again to retry"
                 .into(),
         );
     }
 
-    // ---- record: now it's provably in the pool ----
+    // ---- record: now it's provably in the cloud ----
     set_trip_meta(&dir, "share", "shared")
         .map_err(|e| format!("uploaded and verified, but couldn't record share state: {e}"))?;
+
+    // Baseline: your subtree is now verified in the cloud. Replace your rows with
+    // exactly what we just uploaded (rel + size), keeping any pulled rows so
+    // others' footage in the cloud stays accounted for.
+    // Stat outside the lock, then merge the rows in — the upload above is the slow
+    // part and must not hold the shared state.
+    let rows: Vec<(String, u64)> = mine
+        .iter()
+        .filter_map(|p| {
+            let rel = p.strip_prefix(&dir).ok()?.to_str()?.replace('\\', "/");
+            Some((rel, std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)))
+        })
+        .collect();
+    let _ = FileSet::update(&cfg.base_path(trip), |base| {
+        base.files
+            .retain(|rel, _| rel.split('/').next() != Some(cfg.user.as_str()));
+        for (rel, size) in &rows {
+            base.insert(rel, *size);
+        }
+    });
 
     let bytes = mine
         .iter()

@@ -4,13 +4,13 @@
 //! a callback, so the GUI layer can stream it without reel-core taking a UI dep.
 //!
 //! Scope note: this copies masters only. The cameras' native `.LRF`/`.LRV`
-//! proxies stay a separate step; the shared-pool push that marks a trip "shared"
+//! proxies stay a separate step; the shared-cloud push that marks a trip "shared"
 //! lives in `push.rs` and runs as its own action after import.
 
 use crate::cards::card_roots;
 use crate::config::Config;
-use crate::ledger::{Ledger, LedgerRow};
-use crate::media::{fileid_of, kind_of, masters_under};
+use crate::ledger::{Ledger, LedgerRow, Tombstones};
+use crate::media::{fileid_of, is_photo, kind_of, masters_under};
 use crate::model::{ImportProgress, ImportResult};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -145,6 +145,13 @@ pub fn import_window(
     ensure_project(&dir).map_err(|e| format!("couldn't create trip '{trip}': {e}"))?;
 
     let mut ledger = Ledger::load(&cfg.ledger_path());
+    let tombs = Tombstones::load(&cfg.tombstones_path());
+    // Rows to record. Collected and merged in once at the end: the copy loop below
+    // moves gigabytes, and holding the ledger across it would let our stale copy
+    // overwrite a delete's tombstoning that landed in the meantime. The local
+    // `ledger` stays updated too, so the planning loop's dedup checks still see
+    // what we've already claimed in this run.
+    let mut new_rows: Vec<LedgerRow> = Vec::new();
 
     // Plan: which in-window masters are new here, already here, or another trip's.
     let mut jobs: Vec<Job> = Vec::new();
@@ -159,6 +166,11 @@ pub fn import_window(
             Ok(id) => id,
             Err(_) => continue, // unreadable on the card; leave it
         };
+        // Deleted for good: skip it silently, so footage you threw away can't be
+        // re-imported just because its ledger row is gone.
+        if tombs.contains(&fileid) {
+            continue;
+        }
         match ledger.trip_of(&fileid) {
             Some(o) if o == trip => {
                 skipped_here += 1;
@@ -181,15 +193,9 @@ pub fn import_window(
         // A byte-identical copy already sitting in the trip is a pre-ledger import:
         // record it and move on, so the ledger self-heals without re-copying.
         if dest.is_file() && fs::metadata(&dest).map(|m| m.len()).unwrap_or(0) == bytes {
-            ledger.upsert(ledger_row(
-                &fileid,
-                trip,
-                &cfg.user,
-                kind.dir(),
-                &base,
-                bytes,
-                at,
-            ));
+            let row = ledger_row(&fileid, trip, &cfg.user, kind.dir(), &base, bytes, at);
+            ledger.upsert(row.clone());
+            new_rows.push(row);
             skipped_here += 1;
             continue;
         }
@@ -207,12 +213,13 @@ pub fn import_window(
     let grand_total: u64 = jobs.iter().map(|j| j.bytes).sum();
     let file_count = jobs.len();
     let mut copied = 0usize;
+    let mut photos = 0usize;
     let mut copied_bytes = 0u64;
 
     for (i, job) in jobs.iter().enumerate() {
         copy_clip(job, i + 1, file_count, copied_bytes, grand_total, &mut on)
             .map_err(|e| format!("copy failed for {}: {e}", job.base))?;
-        ledger.upsert(ledger_row(
+        new_rows.push(ledger_row(
             &job.fileid,
             trip,
             &cfg.user,
@@ -222,12 +229,18 @@ pub fn import_window(
             job.at,
         ));
         copied += 1;
+        if is_photo(&job.src) {
+            photos += 1;
+        }
         copied_bytes += job.bytes;
     }
 
-    ledger
-        .save(&cfg.ledger_path())
-        .map_err(|e| format!("couldn't write ledger: {e}"))?;
+    Ledger::update(&cfg.ledger_path(), |l| {
+        for row in &new_rows {
+            l.upsert(row.clone());
+        }
+    })
+    .map_err(|e| format!("couldn't write ledger: {e}"))?;
 
     Ok(ImportResult {
         trip: trip.to_string(),
@@ -235,5 +248,6 @@ pub fn import_window(
         bytes: copied_bytes,
         skipped_here,
         skipped_other,
+        photos,
     })
 }

@@ -9,7 +9,7 @@
 
 use crate::config::Config;
 use crate::ledger::Ledger;
-use crate::media::{captured_at, masters_in, native_proxy_of, quick_fileid, rel_stem};
+use crate::media::{captured_at, is_photo, masters_in, native_proxy_of, quick_fileid, rel_stem};
 use crate::model::{Mark, Playlist, ReviewClip};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -73,9 +73,14 @@ pub fn write_marks(dir: &Path, marks: &[Mark]) -> std::io::Result<()> {
             m.master, m.start, m.end, label
         ));
     }
-    let tmp = dir.join("marks.tsv.partial");
+    // Unique temp: a fixed `.partial` name lets two writers (the player autosaving
+    // while a move migrates marks) publish each other's half-written body.
+    let out = dir.join("marks.tsv");
+    let tmp = crate::store::temp_sibling(&out);
     std::fs::write(&tmp, body)?;
-    std::fs::rename(&tmp, dir.join("marks.tsv"))
+    std::fs::rename(&tmp, &out).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 /// Build the review playlist for a trip: every master in capture order, each
@@ -124,6 +129,25 @@ pub fn review_playlist(cfg: &Config, trip: &str) -> Result<Playlist, String> {
                 .get(m)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| quick_fileid(m));
+            // Provenance: the person folder this master sits in (`<trip>/<person>/…`).
+            let person = m
+                .strip_prefix(&dir)
+                .ok()
+                .and_then(|r| r.components().next())
+                .and_then(|c| c.as_os_str().to_str())
+                .unwrap_or("")
+                .to_string();
+            let mine = person == cfg.user;
+            // A photo is shown directly as an image — no proxy, and its poster is
+            // itself (thumbs downsizes the JPEG). Videos pull frames from the small
+            // proxy when one exists.
+            let photo = is_photo(m);
+            let native = native_proxy_of(m);
+            let poster = if proxied {
+                play.clone()
+            } else {
+                native.clone().unwrap_or_else(|| m.clone())
+            };
             ReviewClip {
                 master: m.display().to_string(),
                 play: play.display().to_string(),
@@ -135,11 +159,16 @@ pub fn review_playlist(cfg: &Config, trip: &str) -> Result<Playlist, String> {
                 fileid,
                 captured: captured_at(m),
                 bytes,
+                poster: poster.display().to_string(),
                 proxied,
-                has_proxy: native_proxy_of(m).is_some(),
+                has_proxy: native.is_some(),
                 // A real camera master is always multiple MB; a sub-512 KiB file
                 // is a card stub (empty placeholder, no streams) that can't play.
-                stub: !proxied && bytes < 512 * 1024,
+                // Photos are never stubs — they display as images at any size.
+                stub: !photo && !proxied && bytes < 512 * 1024,
+                photo,
+                person,
+                mine,
             }
         })
         .collect();
@@ -147,6 +176,74 @@ pub fn review_playlist(cfg: &Config, trip: &str) -> Result<Playlist, String> {
         trip: trip.to_string(),
         clips,
         marks: read_marks(&dir),
+    })
+}
+
+/// Build a **read-only** preview playlist for the inserted card, optionally
+/// limited to one capture session's `[start, end]` window. Card footage isn't a
+/// trip, so there are no marks; `play` is a cached card proxy when one's been
+/// built (see `proxy::ensure_card_proxy`), else the master. Ids are the cheap
+/// stat-based `quick_fileid` — the card isn't on the ledger — so opening a session
+/// stays instant no matter how many clips it holds.
+pub fn card_playlist(cfg: &Config, window: Option<(i64, i64)>) -> Result<Playlist, String> {
+    let roots = crate::cards::card_roots(cfg);
+    if roots.is_empty() {
+        return Err("no card inserted".into());
+    }
+    let mut masters = crate::cards::card_masters(&roots);
+    if let Some((start, end)) = window {
+        masters.retain(|(at, _)| *at >= start && *at <= end);
+    }
+    if masters.is_empty() {
+        return Err("no footage on the card to preview".into());
+    }
+    let clips = masters
+        .iter()
+        .map(|(at, m)| {
+            let fileid = quick_fileid(m);
+            let cached = cfg.card_proxy_path(&fileid);
+            let proxied = cached.is_file();
+            let play = if proxied { &cached } else { m };
+            let bytes = std::fs::metadata(m).map(|x| x.len()).unwrap_or(0);
+            // A photo shows directly as an image (poster = itself). Video frames
+            // come from the small proxy, never the multi-GB master: a built proxy
+            // if we have one, else the native `.LRF`/`.LRV` on the card.
+            let photo = is_photo(m);
+            let native = native_proxy_of(m);
+            let poster = if proxied {
+                play.clone()
+            } else {
+                native.clone().unwrap_or_else(|| m.clone())
+            };
+            ReviewClip {
+                master: m.display().to_string(),
+                play: play.display().to_string(),
+                name: m
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                fileid,
+                captured: *at,
+                bytes,
+                poster: poster.display().to_string(),
+                proxied,
+                has_proxy: native.is_some(),
+                // A real camera master is always multiple MB; a sub-512 KiB file
+                // is a card stub (empty placeholder, no streams) that can't play.
+                // Photos are never stubs — they display as images at any size.
+                stub: !photo && !proxied && bytes < 512 * 1024,
+                photo,
+                // No provenance for card footage — it isn't in any trip yet.
+                person: String::new(),
+                mine: false,
+            }
+        })
+        .collect();
+    Ok(Playlist {
+        trip: "card".to_string(),
+        clips,
+        marks: Vec::new(),
     })
 }
 

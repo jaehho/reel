@@ -2363,12 +2363,14 @@ dependencies = [
 name = "reel-tauri"
 version = "0.1.0"
 dependencies = [
+ "gtk",
  "reel-core",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tiny_http",
+ "webkit2gtk",
 ]
 
 [[package]]

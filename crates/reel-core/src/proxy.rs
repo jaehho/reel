@@ -12,7 +12,7 @@
 //! Either way the result is one cached, webview-friendly file per master.
 
 use crate::config::Config;
-use crate::media::{native_proxy_of, rel_stem, under};
+use crate::media::{is_photo, native_proxy_of, quick_fileid, rel_stem, under};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -25,12 +25,38 @@ pub fn ensure_proxy(cfg: &Config, trip: &str, master: &Path) -> Result<PathBuf, 
     if !under(master, &cfg.lib) {
         return Err("clip is outside the library".into());
     }
+    // A photo needs no proxy — it's shown directly as an image.
+    if is_photo(master) {
+        return Ok(master.to_path_buf());
+    }
     let dir = cfg.lib.join(trip);
     let out = dir
         .join(".proxies")
         .join(format!("{}.mp4", rel_stem(master, &dir)));
+    build_proxy(master, &out)
+}
+
+/// A card-preview proxy for a clip still on the card, cached by content id under
+/// the cache dir (a card clip has no trip). Guarded to the same roots the clip
+/// server streams from, so only a real card/library path is ever transcoded.
+pub fn ensure_card_proxy(cfg: &Config, master: &Path) -> Result<PathBuf, String> {
+    if !cfg.clip_roots().iter().any(|r| under(master, r)) {
+        return Err("clip is outside the library or a card".into());
+    }
+    // A photo needs no proxy — it's shown directly as an image.
+    if is_photo(master) {
+        return Ok(master.to_path_buf());
+    }
+    let out = cfg.card_proxy_path(&quick_fileid(master));
+    build_proxy(master, &out)
+}
+
+/// Build a clean, single-stream, webview-playable proxy for `master` at `out`,
+/// or return it if already cached. Prefers remuxing a native `.LRF`/`.LRV` (fast,
+/// no re-encode) over transcoding the master to 720p H.264.
+fn build_proxy(master: &Path, out: &Path) -> Result<PathBuf, String> {
     if out.is_file() {
-        return Ok(out);
+        return Ok(out.to_path_buf());
     }
 
     // Prefer a native proxy as the source: it's small, already 720p H.264, and
@@ -41,7 +67,7 @@ pub fn ensure_proxy(cfg: &Config, trip: &str, master: &Path) -> Result<PathBuf, 
         return Err(format!("nothing to build from: {}", source.display()));
     }
     if let Some(parent) = out.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("couldn't make .proxies: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("couldn't make proxy dir: {e}"))?;
     }
 
     // Temp sibling → an interrupted build never leaves a half proxy that looks done.
@@ -87,8 +113,8 @@ pub fn ensure_proxy(cfg: &Config, trip: &str, master: &Path) -> Result<PathBuf, 
         .map_err(|e| format!("ffmpeg won't start: {e} (is it installed?)"))?;
 
     if output.status.success() && tmp.is_file() {
-        std::fs::rename(&tmp, &out).map_err(|e| format!("couldn't save proxy: {e}"))?;
-        Ok(out)
+        std::fs::rename(&tmp, out).map_err(|e| format!("couldn't save proxy: {e}"))?;
+        Ok(out.to_path_buf())
     } else {
         let _ = std::fs::remove_file(&tmp);
         // Surface ffmpeg's own reason (last stderr line) so a failure is diagnosable.

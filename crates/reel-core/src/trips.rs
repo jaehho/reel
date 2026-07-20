@@ -62,9 +62,11 @@ pub fn set_trip_meta(dir: &Path, key: &str, value: &str) -> std::io::Result<()> 
     }
     let mut body = lines.join("\n");
     body.push('\n');
-    let tmp = dir.join(".reel.partial");
+    let tmp = crate::store::temp_sibling(&path);
     std::fs::write(&tmp, body)?;
-    std::fs::rename(&tmp, &path)
+    std::fs::rename(&tmp, &path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 /// Share state from the `.reel` `share=` line. `Unknown` unless explicitly
@@ -147,7 +149,13 @@ fn derive_state(masters: usize, marks: usize, clips: usize) -> TripState {
     }
 }
 
-fn build_trip(me: &str, dir: &Path) -> Trip {
+fn build_trip(cfg: &Config, dir: &Path) -> Trip {
+    let me = cfg.user.as_str();
+    let name = dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
     let masters_v = masters_in(dir);
     let masters = masters_v.len();
     let marks = count_marks(&dir.join("marks.tsv"));
@@ -188,12 +196,10 @@ fn build_trip(me: &str, dir: &Path) -> Trip {
     // the first and last clips' timestamps bound the trip.
     let start = masters_v.first().map(|p| captured_at(p)).filter(|&t| t > 0);
     let end = masters_v.last().map(|p| captured_at(p)).filter(|&t| t > 0);
+    let sync = crate::sync::brief(cfg, &name, &masters_v, dir);
+    let shared_with = crate::share::cached_shares(cfg, &name);
     Trip {
-        name: dir
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string(),
+        name,
         path: dir.display().to_string(),
         masters,
         marks,
@@ -210,12 +216,11 @@ fn build_trip(me: &str, dir: &Path) -> Trip {
         mine,
         pulled: masters - mine,
         contributors,
+        sync,
+        shared_with,
     }
 }
 
 pub fn list_trips(cfg: &Config) -> Vec<Trip> {
-    trip_dirs(cfg)
-        .iter()
-        .map(|d| build_trip(&cfg.user, d))
-        .collect()
+    trip_dirs(cfg).iter().map(|d| build_trip(cfg, d)).collect()
 }

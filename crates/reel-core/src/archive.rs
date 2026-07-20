@@ -1,12 +1,12 @@
-//! Free a trip's local raw footage once it's safe in the shared pool: confirm
-//! every master is in the pool, then delete the per-person camera trees (plus
+//! Free a trip's local raw footage once it's safe in the shared cloud: confirm
+//! every master is in the cloud, then delete the per-person camera trees (plus
 //! `_sheets/`/`.proxies/`), keeping the cut clips, marks, and `.reel`. The trip
 //! then reads "Archived" and its raw can be re-pulled. Mirrors the script's
 //! `archive`.
 //!
 //! Two steps, like `wipe`: `plan_archive` verifies and reports what would be
 //! freed (no deletion); `commit_archive` re-verifies — because it's deleting the
-//! only local copies — and then frees the raw. The pool check aborts the whole
+//! only local copies — and then frees the raw. The cloud check aborts the whole
 //! operation on the first miss, so raw is never freed unless it's recoverable.
 
 use crate::config::Config;
@@ -66,7 +66,7 @@ fn trip_masters(cfg: &Config, trip: &str) -> Result<(PathBuf, Vec<PathBuf>), Str
 /// Confirm every master in `dir` hash-matches in `<remote>/<trip>`, streaming
 /// rclone's per-file check progress. The `--files-from` list scopes it to exactly
 /// the raw we're about to free.
-fn verify_all_in_pool(
+fn verify_all_in_cloud(
     cfg: &Config,
     trip: &str,
     dir: &Path,
@@ -82,7 +82,7 @@ fn verify_all_in_pool(
         .collect();
     let list = cfg.state_dir.join(format!(".archive-check-{trip}.lst"));
     fs::write(&list, format!("{}\n", rels.join("\n")))
-        .map_err(|e| format!("couldn't stage pool check: {e}"))?;
+        .map_err(|e| format!("couldn't stage cloud check: {e}"))?;
 
     let remote_trip = format!("{}/{}", cfg.remote.trim_end_matches('/'), trip);
     let args: Vec<OsString> = vec![
@@ -104,21 +104,21 @@ fn verify_all_in_pool(
     match ok {
         Ok(true) => Ok(()),
         Ok(false) => Err(format!(
-            "not all of '{trip}' is in the pool — Share it first; nothing freed"
+            "not all of '{trip}' is in the cloud — Share it first; nothing freed"
         )),
         Err(e) => Err(e),
     }
 }
 
 /// Work out what archiving `trip` would free, confirming every master is in the
-/// pool first. Nothing is deleted.
+/// cloud first. Nothing is deleted.
 pub fn plan_archive(
     cfg: &Config,
     trip: &str,
     on: impl FnMut(ArchiveProgress),
 ) -> Result<ArchivePlan, String> {
     let (dir, masters) = trip_masters(cfg, trip)?;
-    verify_all_in_pool(cfg, trip, &dir, &masters, on)?;
+    verify_all_in_cloud(cfg, trip, &dir, &masters, on)?;
     let bytes = raw_dirs(&dir).iter().map(|d| dir_bytes(d)).sum();
     Ok(ArchivePlan {
         trip: trip.to_string(),
@@ -127,7 +127,7 @@ pub fn plan_archive(
     })
 }
 
-/// Free `trip`'s local raw. Re-verifies against the pool first — these are the
+/// Free `trip`'s local raw. Re-verifies against the cloud first — these are the
 /// only local copies, so the backup is reconfirmed at delete time — then removes
 /// the raw dirs, keeping `clips/`, `marks.tsv`, and `.reel`.
 pub fn commit_archive(
@@ -136,7 +136,7 @@ pub fn commit_archive(
     on: impl FnMut(ArchiveProgress),
 ) -> Result<ArchiveResult, String> {
     let (dir, masters) = trip_masters(cfg, trip)?;
-    verify_all_in_pool(cfg, trip, &dir, &masters, on)?;
+    verify_all_in_cloud(cfg, trip, &dir, &masters, on)?;
 
     let mut freed = 0u64;
     for d in raw_dirs(&dir) {

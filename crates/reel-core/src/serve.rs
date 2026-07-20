@@ -9,7 +9,7 @@
 //! `http://127.0.0.1` because WebKitGTK can't play a custom URI scheme.
 
 use crate::media::under;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A serving decision: the Tauri layer maps these onto HTTP headers and streams
 /// `send` from the file itself. Streaming (rather than buffering a body) keeps
@@ -85,12 +85,13 @@ fn parse_range(header: &str, len: u64) -> Option<(u64, u64)> {
     Some((start, end))
 }
 
-/// Decide how to serve `target` (confined to `lib`), honouring an optional
-/// `Range`. Returns 403 outside the library, 404 if missing, 416 for an
+/// Decide how to serve `target` (confined to one of `roots`), honouring an
+/// optional `Range`. Returns 403 outside every root, 404 if missing, 416 for an
 /// unsatisfiable range, 206 for a partial range, and 200 for a whole file. No
 /// bytes are read here — the caller streams `send` straight from the file.
-pub fn serve_clip(lib: &Path, target: &Path, range: Option<&str>) -> ClipResponse {
-    if !under(target, lib) {
+/// `roots` is the library plus any card mount (see `Config::clip_roots`).
+pub fn serve_clip(roots: &[PathBuf], target: &Path, range: Option<&str>) -> ClipResponse {
+    if !roots.iter().any(|r| under(target, r)) {
         return ClipResponse::err(403);
     }
     let len = match std::fs::metadata(target) {

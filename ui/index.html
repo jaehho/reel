@@ -13,6 +13,15 @@
         <span class="brand-name">reel</span>
       </div>
       <p class="summary" id="summary"></p>
+      <button class="btn ghost" id="organize-open" type="button">
+        <span class="btn-ico" aria-hidden="true">▦</span> Organize
+      </button>
+      <button class="btn ghost" id="sync-all" type="button" title="Sync every trip with the cloud — upload, download, and apply owed ops">
+        <span class="btn-ico" aria-hidden="true">⇅</span> Sync
+      </button>
+      <button class="btn ghost" id="dedup-open" type="button" title="Find clips that exist in more than one trip (or as a cloud orphan) and prune the extras">
+        <span class="btn-ico" aria-hidden="true">⧉</span> Duplicates
+      </button>
       <button class="btn ghost" id="refresh" type="button">
         <span class="btn-ico" aria-hidden="true">↻</span> Rescan
       </button>
@@ -25,6 +34,7 @@
         <div class="panel-head">
           <h2 class="heading">Trips</h2>
           <span class="panel-sub" id="trips-sub"></span>
+          <span class="share-all-slot" id="share-all-slot"></span>
         </div>
         <div id="trips" class="trip-grid"></div>
       </section>
@@ -78,7 +88,7 @@
 
         <div class="import-progress" id="confirm-check">
           <div class="imp-row">
-            <span class="imp-file" id="confirm-stage">Checking the pool…</span>
+            <span class="imp-file" id="confirm-stage">Checking the cloud…</span>
             <span class="imp-pct tnum" id="confirm-count"></span>
           </div>
           <div class="bar"><div class="bar-fill" id="confirm-bar"></div></div>
@@ -88,11 +98,217 @@
         <p class="dialog-error" id="confirm-error" role="alert" hidden></p>
 
         <div class="dialog-foot">
+          <button class="btn ghost small subtle" type="button" id="confirm-alt" hidden></button>
           <button class="btn ghost" type="button" id="confirm-cancel">Cancel</button>
           <button class="btn danger" type="button" id="confirm-go" disabled></button>
         </div>
       </form>
     </dialog>
+
+    <!-- Pick a destination trip: player "move clip", trip "move all", board bulk move -->
+    <dialog id="pick-dialog" class="dialog" aria-labelledby="pick-title">
+      <form method="dialog" class="import-form">
+        <div class="dialog-head">
+          <h2 class="dialog-title" id="pick-title">Move to trip</h2>
+          <p class="dialog-meta" id="pick-meta"></p>
+        </div>
+        <div class="field">
+          <label class="field-label" for="pick-input">Into trip</label>
+          <input class="input" id="pick-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="trip name" />
+          <p class="field-hint">A new name creates a trip; pick one below to add to it.</p>
+          <div class="trip-picks" id="pick-picks" hidden></div>
+        </div>
+        <p class="dialog-error" id="pick-error" role="alert" hidden></p>
+        <div class="dialog-foot">
+          <button class="btn ghost" type="button" id="pick-cancel">Cancel</button>
+          <button class="btn primary" type="button" id="pick-go">Move</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Rename a trip -->
+    <dialog id="name-dialog" class="dialog" aria-labelledby="name-title">
+      <form method="dialog" class="import-form">
+        <div class="dialog-head">
+          <h2 class="dialog-title" id="name-title">Rename trip</h2>
+        </div>
+        <div class="field">
+          <label class="field-label" for="name-input" id="name-label">New name</label>
+          <input class="input" id="name-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" />
+        </div>
+        <p class="dialog-error" id="name-error" role="alert" hidden></p>
+        <div class="dialog-foot">
+          <button class="btn ghost" type="button" id="name-cancel">Cancel</button>
+          <button class="btn primary" type="button" id="name-go">Rename</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Danger confirm: permanent delete (clips or a whole trip) -->
+    <dialog id="danger-dialog" class="dialog" aria-labelledby="danger-title">
+      <form method="dialog" class="import-form">
+        <div class="dialog-head">
+          <h2 class="dialog-title" id="danger-title">Delete</h2>
+          <p class="dialog-meta" id="danger-body"></p>
+        </div>
+        <p class="dialog-error" id="danger-error" role="alert" hidden></p>
+        <div class="dialog-foot">
+          <button class="btn ghost" type="button" id="danger-cancel">Cancel</button>
+          <button class="btn danger" type="button" id="danger-go">Delete forever</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Pull from the cloud: contributors you can bring into a trip -->
+    <dialog id="pull-dialog" class="dialog" aria-labelledby="pull-title">
+      <form method="dialog" class="import-form">
+        <div class="dialog-head">
+          <h2 class="dialog-title" id="pull-title">Pull from cloud</h2>
+          <p class="dialog-meta" id="pull-meta"></p>
+        </div>
+        <div class="pull-list" id="pull-list"></div>
+        <p class="dialog-error" id="pull-error" role="alert" hidden></p>
+        <div class="dialog-foot">
+          <button class="btn ghost" type="button" id="pull-close">Close</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Share one trip's cloud folder with specific Nextcloud users (OCS Share
+         API, via reel-core), so friends see only the trips they're on — not the
+         whole cloud. Availability is gated: a non-Nextcloud remote disables it. -->
+    <dialog id="share-dialog" class="dialog" aria-labelledby="share-title">
+      <form method="dialog" class="import-form">
+        <div class="dialog-head">
+          <h2 class="dialog-title" id="share-title">Share trip</h2>
+          <p class="dialog-meta" id="share-meta"></p>
+        </div>
+        <div class="pull-list" id="share-list"></div>
+        <div class="share-add" id="share-add" hidden>
+          <div class="combo" id="share-combo">
+            <input class="input" id="share-user" type="text"
+                   placeholder="Add a friend by name…" autocomplete="off"
+                   autocapitalize="off" spellcheck="false" role="combobox"
+                   aria-autocomplete="list" aria-expanded="false"
+                   aria-controls="share-menu" />
+            <button class="combo-toggle" type="button" id="share-toggle"
+                    tabindex="-1" aria-label="Show people you share with">▾</button>
+            <div class="combo-menu" id="share-menu" role="listbox" hidden></div>
+          </div>
+          <button class="btn primary" type="button" id="share-go">Share</button>
+        </div>
+        <p class="dialog-error" id="share-error" role="alert" hidden></p>
+        <div class="dialog-foot">
+          <button class="btn ghost" type="button" id="share-close">Close</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Sync a trip with the cloud: what to push/pull/clean, plus owed ops. -->
+    <dialog id="sync-dialog" class="dialog" aria-labelledby="sync-title">
+      <form method="dialog" class="import-form">
+        <div class="dialog-head">
+          <h2 class="dialog-title" id="sync-title">Sync</h2>
+          <p class="dialog-meta" id="sync-meta"></p>
+        </div>
+        <div class="pull-list" id="sync-list"></div>
+        <div class="sync-prog" id="sync-prog" hidden>
+          <div class="sync-prog-row"><span id="sync-stage"></span><span class="tnum" id="sync-pct"></span></div>
+          <div class="bar"><div class="bar-fill" id="sync-fill"></div></div>
+        </div>
+        <p class="dialog-error" id="sync-error" role="alert" hidden></p>
+        <div class="dialog-foot">
+          <button class="btn ghost" type="button" id="sync-refresh">
+            <span class="btn-ico" aria-hidden="true">↻</span> Refresh
+          </button>
+          <button class="btn ghost" type="button" id="sync-close">Close</button>
+          <button class="btn primary" type="button" id="sync-go">Sync</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Global Sync progress: sweeping every trip through the cloud, one at a time,
+         with an overall counter, the trip in flight, and a per-trip log. -->
+    <dialog id="syncall-dialog" class="dialog" aria-labelledby="syncall-title">
+      <form method="dialog" class="import-form">
+        <div class="dialog-head">
+          <h2 class="dialog-title" id="syncall-title">Syncing every trip</h2>
+          <p class="dialog-meta" id="syncall-meta">Checking the cloud…</p>
+        </div>
+        <div class="sync-prog" id="syncall-prog">
+          <div class="sync-prog-row">
+            <span id="syncall-overall">Preparing…</span>
+            <span class="tnum" id="syncall-count"></span>
+          </div>
+          <div class="bar"><div class="bar-fill" id="syncall-obar"></div></div>
+          <div class="sync-prog-row sync-cur">
+            <span id="syncall-stage"></span><span class="tnum" id="syncall-pct"></span>
+          </div>
+          <div class="bar bar-sub"><div class="bar-fill" id="syncall-fill"></div></div>
+        </div>
+        <ul class="sync-log" id="syncall-log"></ul>
+        <p class="dialog-error" id="syncall-error" role="alert" hidden></p>
+        <div class="dialog-foot">
+          <button class="btn primary" type="button" id="syncall-close" disabled>Close</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Global duplicate finder: the same clip in more than one trip, or a cloud
+         orphan left by a reorg. Pick which copy to keep per group; the rest are
+         pruned (local + cloud) without tombstoning — the content survives. -->
+    <dialog id="dedup-dialog" class="dialog" aria-labelledby="dedup-title">
+      <form method="dialog" class="import-form">
+        <div class="dialog-head">
+          <h2 class="dialog-title" id="dedup-title">Duplicates</h2>
+          <p class="dialog-meta" id="dedup-meta"></p>
+        </div>
+        <div class="pull-list" id="dedup-list"></div>
+        <div class="sync-prog" id="dedup-prog" hidden>
+          <div class="sync-prog-row"><span id="dedup-stage"></span><span class="tnum" id="dedup-pct"></span></div>
+          <div class="bar"><div class="bar-fill" id="dedup-fill"></div></div>
+        </div>
+        <p class="dialog-error" id="dedup-error" role="alert" hidden></p>
+        <div class="dialog-foot">
+          <button class="btn ghost" type="button" id="dedup-rescan">
+            <span class="btn-ico" aria-hidden="true">↻</span> Rescan
+          </button>
+          <button class="btn ghost" type="button" id="dedup-close">Close</button>
+          <button class="btn primary" type="button" id="dedup-go">Prune</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Organize board: every trip a lane; drag clips across lanes to move them,
+         drop onto "+ New trip" to split some off. Header ⋯ does trip-level ops. -->
+    <section id="organize" class="organize" hidden aria-label="Organize footage">
+      <header class="org-head" data-tauri-drag-region>
+        <button class="btn ghost small" id="org-back" type="button">
+          <span class="btn-ico" aria-hidden="true">←</span> Done
+        </button>
+        <div class="org-id">
+          <span class="org-title">Organize</span>
+          <span class="org-sub tnum" id="org-sub"></span>
+        </div>
+        <div class="org-tools">
+          <span class="org-selcount tnum" id="org-selcount"></span>
+          <button class="btn ghost small" id="org-move" type="button" disabled>Move to…</button>
+          <button class="btn ghost small danger-text" id="org-delete" type="button" disabled>Delete</button>
+        </div>
+      </header>
+      <div class="org-board" id="org-board"></div>
+      <div class="org-keys keyhints" aria-hidden="true">
+        <span class="kh"><kbd>←</kbd><kbd>→</kbd>clip</span>
+        <span class="kh"><kbd>↑</kbd><kbd>↓</kbd>trip</span>
+        <span class="kh"><kbd>space</kbd>select</span>
+        <span class="kh"><kbd>shift</kbd>+<kbd>→</kbd>range</span>
+        <span class="kh"><kbd>ctrl</kbd><kbd>a</kbd>all</span>
+        <span class="kh-sep"></span>
+        <span class="kh"><kbd>m</kbd>move to…</span>
+        <span class="kh"><kbd>⌫</kbd>delete</span>
+        <span class="kh"><kbd>esc</kbd>done</span>
+      </div>
+    </section>
 
     <!-- Review / player: a full-screen cutting room, shown over the dashboard -->
     <section id="player" class="player" hidden aria-label="Review">
@@ -105,8 +321,13 @@
           <span class="player-clip tnum" id="player-clip"></span>
         </div>
         <div class="player-tools">
+          <span class="who-badge" id="player-who" hidden></span>
           <button class="src-tag" id="player-proxy" type="button" hidden></button>
           <span class="player-mark-count tnum" id="player-mark-count"></span>
+          <button class="btn ghost small" id="player-move" type="button" title="Move this clip to another trip (m)">Move</button>
+          <button class="iconbtn ghost trash" id="player-trash" type="button" aria-label="Delete this clip permanently" title="Delete this clip permanently">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/></svg>
+          </button>
           <button class="btn ghost small" id="player-list" type="button">Marks</button>
         </div>
       </header>
@@ -114,6 +335,7 @@
       <div class="player-main">
         <div class="stage" id="stage">
           <video id="video" playsinline preload="auto"></video>
+          <img id="photo" class="stage-photo" alt="" hidden />
           <div class="stage-over" id="stage-over" hidden></div>
         </div>
         <aside class="marks-panel" id="marks-panel" hidden>
@@ -143,13 +365,15 @@
           </div>
         </div>
         <div class="keyhints" id="keyhints" aria-hidden="true">
-          <span class="kh"><kbd>i</kbd>in</span>
-          <span class="kh" id="hint-out"><kbd>o</kbd>out</span>
-          <span class="kh"><kbd>h</kbd>highlight</span>
-          <span class="kh"><kbd>e</kbd>label</span>
-          <span class="kh"><kbd>u</kbd>undo</span>
-          <span class="kh"><kbd>⌫</kbd>delete</span>
-          <span class="kh-sep"></span>
+          <span class="kh edit-hint"><kbd>i</kbd>in</span>
+          <span class="kh edit-hint" id="hint-out"><kbd>o</kbd>out</span>
+          <span class="kh edit-hint"><kbd>h</kbd>highlight</span>
+          <span class="kh edit-hint"><kbd>e</kbd>label</span>
+          <span class="kh edit-hint"><kbd>u</kbd>undo</span>
+          <span class="kh edit-hint"><kbd>⌫</kbd>delete mark</span>
+          <span class="kh edit-hint"><kbd>m</kbd>move clip</span>
+          <span class="kh edit-hint"><kbd>shift</kbd><kbd>⌫</kbd>delete clip</span>
+          <span class="kh-sep edit-hint"></span>
           <span class="kh"><kbd>space</kbd>play</span>
           <span class="kh"><kbd>j</kbd><kbd>k</kbd><kbd>l</kbd>shuttle</span>
           <span class="kh"><kbd>home</kbd><kbd>end</kbd>clip ends</span>
@@ -157,8 +381,8 @@
           <span class="kh-sep"></span>
           <span class="kh"><kbd>←</kbd><kbd>→</kbd>seek</span>
           <span class="kh"><kbd>[</kbd><kbd>]</kbd>clip</span>
-          <span class="kh"><kbd>Ctrl</kbd><kbd>←</kbd><kbd>→</kbd>mark</span>
-          <span class="kh"><kbd>x</kbd>marks</span>
+          <span class="kh edit-hint"><kbd>Ctrl</kbd><kbd>←</kbd><kbd>→</kbd>mark</span>
+          <span class="kh edit-hint"><kbd>x</kbd>marks</span>
         </div>
         <div class="filmstrip" id="filmstrip"></div>
       </footer>

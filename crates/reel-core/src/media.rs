@@ -48,14 +48,42 @@ pub fn kind_of(path: &Path) -> Kind {
     }
 }
 
-pub const MASTER_EXT: &[&str] = &["mp4", "mov", "mkv"];
-pub const MEDIA_EXT: &[&str] = &["mp4", "mov", "mkv", "lrf", "lrv", "thm"];
+/// Video masters — the files reel plays, marks, and cuts.
+pub const VIDEO_EXT: &[&str] = &["mp4", "mov", "mkv"];
+/// Photo captures reel imports alongside video: ordinary pictures, and DJI's
+/// finished panoramas (the drone stitches its source frames on-board and writes
+/// the result as a normal wide JPEG beside the videos — that's the one image).
+pub const PHOTO_EXT: &[&str] = &["jpg", "jpeg", "png", "heic", "heif", "webp", "dng"];
+/// Everything reel treats as a capture. A card's masters are videos and photos
+/// together — imported, pushed, synced, and cleared the same way. Only proxy,
+/// cut, and marks stay video-only (a photo has nothing to remux, scrub, or trim).
+pub const CAPTURE_EXT: &[&str] = &[
+    "mp4", "mov", "mkv", "jpg", "jpeg", "png", "heic", "heif", "webp", "dng",
+];
 
 pub fn has_ext(p: &Path, exts: &[&str]) -> bool {
     p.extension()
         .and_then(|e| e.to_str())
         .map(|e| exts.iter().any(|x| x.eq_ignore_ascii_case(e)))
         .unwrap_or(false)
+}
+
+/// A video master — playable, markable, cuttable.
+pub fn is_video(p: &Path) -> bool {
+    has_ext(p, VIDEO_EXT)
+}
+/// A photo capture — imported like a video, but shown as a still (no proxy/marks).
+pub fn is_photo(p: &Path) -> bool {
+    has_ext(p, PHOTO_EXT)
+}
+
+/// DJI writes a panorama's raw source frames under `DCIM/PANORAMA/<seq>/` and the
+/// finished, stitched panorama as an ordinary photo beside the videos. reel imports
+/// the stitched photo; the source frames are disposable sidecars (swept off the card
+/// with everything else once that photo is cloud-safe — see `wipe`). So capture
+/// discovery on a card skips the `PANORAMA/` subtree.
+pub(crate) fn is_pano_source(p: &Path) -> bool {
+    p.components().any(|c| c.as_os_str() == "PANORAMA")
 }
 
 /// Capture time as epoch seconds. mtime is the capture time on the card and is
@@ -193,13 +221,17 @@ pub fn clip_health(path: &Path) -> ClipHealth {
     ok(duration)
 }
 
-/// `(epoch, path)` for every master under `roots`, capture-ordered.
+/// `(epoch, path)` for every capture under `roots`, capture-ordered — videos and
+/// photos both. On a card this skips the `PANORAMA/` source-frame subtree (see
+/// `is_pano_source`); the stitched panoramas sit beside the videos and are picked
+/// up as ordinary photos.
 pub fn masters_under(roots: &[PathBuf]) -> Vec<(i64, PathBuf)> {
     let mut v = Vec::new();
     for r in roots {
         for e in walkdir::WalkDir::new(r).into_iter().filter_map(|e| e.ok()) {
-            if e.file_type().is_file() && has_ext(e.path(), MASTER_EXT) {
-                v.push((captured_at(e.path()), e.path().to_path_buf()));
+            let p = e.path();
+            if e.file_type().is_file() && has_ext(p, CAPTURE_EXT) && !is_pano_source(p) {
+                v.push((captured_at(p), p.to_path_buf()));
             }
         }
     }
@@ -220,7 +252,8 @@ fn in_excluded_dir(p: &Path, base: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Masters inside a trip (excluding derived dirs), capture-ordered.
+/// Captures inside a trip (videos and photos, excluding derived dirs),
+/// capture-ordered.
 pub fn masters_in(dir: &Path) -> Vec<PathBuf> {
     let mut v: Vec<(i64, PathBuf)> = Vec::new();
     for e in walkdir::WalkDir::new(dir)
@@ -228,7 +261,7 @@ pub fn masters_in(dir: &Path) -> Vec<PathBuf> {
         .filter_map(|e| e.ok())
     {
         let p = e.path();
-        if e.file_type().is_file() && has_ext(p, MASTER_EXT) && !in_excluded_dir(p, dir) {
+        if e.file_type().is_file() && has_ext(p, CAPTURE_EXT) && !in_excluded_dir(p, dir) {
             v.push((captured_at(p), p.to_path_buf()));
         }
     }

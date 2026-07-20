@@ -20,3 +20,12 @@ reel-core = { path = "../crates/reel-core" }
 # Loopback HTTP server for <video>. WebKitGTK's media backend can't load a
 # custom URI scheme (WebKit bug 146351), but it plays http://127.0.0.1 fine.
 tiny_http = "0.12"
+
+# A touchpad pinch is a GTK gesture WebKitGTK handles natively — it never reaches
+# the DOM, so the page zooms and JS can't stop it. We claim the gesture on the
+# WebView widget before WebKit sees it and forward it to the UI (see main.rs).
+# Versions must match what tauri builds against, or `inner()` hands back a type
+# from a different crate instance; `cargo tree -i gtk` should show one of each.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "2", features = ["v2_40"] }
+gtk = "0.18"

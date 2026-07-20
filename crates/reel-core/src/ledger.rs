@@ -1,6 +1,7 @@
 //! The import ledger: content-id → trip that already owns each clip. Kept in the
 //! same TSV the original script used, so the two stay interoperable.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -86,8 +87,77 @@ impl Ledger {
                 r.id, r.trip, r.person, r.camera, r.base, r.bytes, r.captured, r.imported_at
             ));
         }
-        let tmp = path.with_extension("tmp");
-        fs::write(&tmp, s)?;
-        fs::rename(&tmp, path)
+        crate::store::write_atomic(path, &s)
+    }
+
+    /// Load → mutate → save under the state lock. An import's copy and a delete's
+    /// cloud call must happen *before* this, with only the resulting row edits made
+    /// inside: two commands that each held the whole ledger across their slow work
+    /// would silently drop one side's rows.
+    pub fn update(path: &Path, f: impl FnOnce(&mut Ledger)) -> io::Result<()> {
+        let _g = crate::store::state_guard();
+        let mut l = Ledger::load(path);
+        f(&mut l);
+        l.save(path)
+    }
+}
+
+/// Content ids the user permanently deleted. A tombstoned clip is dead to the
+/// pipeline: import skips it, and a copy still on a card reads as "discarded"
+/// rather than "new", so a clip you threw away never claws its way back in.
+/// Its own tiny TSV (`deleted.tsv`), separate from the script-shared ledger.
+#[derive(Default)]
+pub struct Tombstones {
+    pub ids: HashSet<String>,
+}
+
+impl Tombstones {
+    pub fn load(path: &Path) -> Self {
+        let mut ids = HashSet::new();
+        if let Ok(txt) = std::fs::read_to_string(path) {
+            for line in txt.lines() {
+                // first field is the id; extra columns (base, when) are for humans
+                if let Some(id) = line.split('\t').next() {
+                    if !id.is_empty() {
+                        ids.insert(id.to_string());
+                    }
+                }
+            }
+        }
+        Tombstones { ids }
+    }
+
+    pub fn contains(&self, id: &str) -> bool {
+        self.ids.contains(id)
+    }
+
+    /// Record a content id as deleted (idempotent).
+    pub fn insert(&mut self, id: &str) {
+        self.ids.insert(id.to_string());
+    }
+
+    /// Write the set back atomically (sorted, so the file is stable across runs).
+    pub fn save(&self, path: &Path) -> io::Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut ids: Vec<&String> = self.ids.iter().collect();
+        ids.sort();
+        let mut s = String::new();
+        for id in ids {
+            s.push_str(id);
+            s.push('\n');
+        }
+        crate::store::write_atomic(path, &s)
+    }
+
+    /// Load → mutate → save under the state lock. A lost tombstone is the worst of
+    /// the state races: the clip stops reading as "discarded", so footage you
+    /// permanently deleted is offered for import again.
+    pub fn update(path: &Path, f: impl FnOnce(&mut Tombstones)) -> io::Result<()> {
+        let _g = crate::store::state_guard();
+        let mut t = Tombstones::load(path);
+        f(&mut t);
+        t.save(path)
     }
 }

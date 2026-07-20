@@ -31,24 +31,25 @@ pub fn start() -> std::io::Result<String> {
         .to_ip()
         .map(|a| a.port())
         .ok_or_else(|| std::io::Error::other("no loopback port"))?;
-    // The library root is fixed for the process, so resolve it once.
-    let lib = Config::from_env().lib;
+    // The allowed roots (library + card mount) are fixed for the process; the
+    // card mount parent is stable across insert/remove, so resolve them once.
+    let roots = Arc::new(Config::from_env().clip_roots());
     let server = Arc::new(server);
     // A few workers so overlapping range requests (a seek fires several) don't
     // serialize behind one another.
     for _ in 0..4 {
         let server = Arc::clone(&server);
-        let lib = lib.clone();
+        let roots = Arc::clone(&roots);
         std::thread::spawn(move || {
             for req in server.incoming_requests() {
-                handle(&lib, req);
+                handle(&roots, req);
             }
         });
     }
     Ok(format!("http://127.0.0.1:{port}"))
 }
 
-fn handle(lib: &Path, req: tiny_http::Request) {
+fn handle(roots: &[PathBuf], req: tiny_http::Request) {
     let target = decode_path(req.url());
     let range = req
         .headers()
@@ -56,7 +57,7 @@ fn handle(lib: &Path, req: tiny_http::Request) {
         .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("range"))
         .map(|h| h.value.as_str().to_string());
 
-    let r = serve_clip(lib, &target, range.as_deref());
+    let r = serve_clip(roots, &target, range.as_deref());
 
     let mut headers = vec![header("Content-Type", r.content_type)];
     if r.accept_ranges {

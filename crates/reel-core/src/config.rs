@@ -8,9 +8,9 @@ use std::path::PathBuf;
 pub struct Config {
     /// Local workspace root (`REEL_LIB`, default `~/Videos`).
     pub lib: PathBuf,
-    /// rclone destination for the shared pool (`REEL_REMOTE`).
+    /// rclone destination for the shared cloud (`REEL_REMOTE`).
     pub remote: String,
-    /// Your folder name inside a trip / the pool (`REEL_USER`).
+    /// Your folder name inside a trip / the cloud (`REEL_USER`).
     pub user: String,
     /// State dir holding the import ledger and logs.
     pub state_dir: PathBuf,
@@ -65,5 +65,74 @@ impl Config {
 
     pub fn ledger_path(&self) -> PathBuf {
         self.state_dir.join("imported.tsv")
+    }
+
+    /// Filesystem roots the loopback clip server is allowed to stream from: the
+    /// library, the card-preview proxy cache, and wherever a card mounts (the
+    /// `/run/media/<user>` parent, or the `DJI_SD`/`GOPRO_SD` overrides). Card
+    /// preview plays clips straight off the card and its remuxed proxies out of the
+    /// cache, so the scope guard has to admit those paths — still same-user-readable
+    /// locations, never an arbitrary path. (Trip proxies live under the library.)
+    pub fn clip_roots(&self) -> Vec<PathBuf> {
+        let mut r = vec![self.lib.clone(), self.cache_dir.join("proxies")];
+        if let Some(p) = &self.dji_sd {
+            r.push(p.clone());
+        }
+        if let Some(p) = &self.gopro_sd {
+            r.push(p.clone());
+        }
+        r.push(PathBuf::from("/run/media").join(&self.media_user));
+        r
+    }
+
+    /// Cache for on-demand *card* preview proxies, keyed by content id so it
+    /// survives a card reinsert and is shared across sessions. (Trip proxies live
+    /// beside their master under `<trip>/.proxies`; a card clip has no trip.)
+    pub fn card_proxy_path(&self, fileid: &str) -> PathBuf {
+        self.cache_dir.join("proxies").join(format!("{fileid}.mp4"))
+    }
+
+    /// Content ids of footage the user permanently deleted. Kept beside the
+    /// ledger so a killed clip still on a card reads as "discarded" and is never
+    /// re-offered for import.
+    pub fn tombstones_path(&self) -> PathBuf {
+        self.state_dir.join("deleted.tsv")
+    }
+
+    /// Per-trip sync baseline: which clips *should* be in the shared cloud
+    /// (`person/camera/base` + size), one file per trip so a rename is a file
+    /// rename with no row rewrites. Diffed against the live cloud listing to work
+    /// out a trip's sync status; maintained by every cloud op.
+    pub fn synced_dir(&self) -> PathBuf {
+        self.state_dir.join("synced")
+    }
+    pub fn base_path(&self, trip: &str) -> PathBuf {
+        self.synced_dir().join(format!("{trip}.tsv"))
+    }
+
+    /// Per-trip cache of the last cloud listing we fetched, so the dashboard can
+    /// show cloud-side drift (and a "checked N ago") without a network hit.
+    pub fn cloud_cache_path(&self, trip: &str) -> PathBuf {
+        self.state_dir.join("cloud").join(format!("{trip}.tsv"))
+    }
+
+    /// Directory of per-trip share caches (one `<trip>.tsv` each). Its union is the
+    /// network-free "friends you share with" list.
+    pub fn share_cache_dir(&self) -> PathBuf {
+        self.state_dir.join("shares")
+    }
+
+    /// Per-trip cache of who the trip's cloud folder is shared with, from the last
+    /// Sharing-panel (or background) fetch — lets the dashboard show a "shared
+    /// with N" chip without a network hit (mirrors `cloud_cache_path`).
+    pub fn share_cache_path(&self, trip: &str) -> PathBuf {
+        self.share_cache_dir().join(format!("{trip}.tsv"))
+    }
+
+    /// Cloud ops owed because the remote was unreachable when they ran (a move, a
+    /// rename, or a whole-trip purge — the ones the local/base/cloud compare can't
+    /// re-derive on its own). Replayed on the next sync.
+    pub fn pending_path(&self) -> PathBuf {
+        self.state_dir.join("pending.tsv")
     }
 }
