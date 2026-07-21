@@ -184,7 +184,10 @@ let thumbActive = 0;
 const THUMB_MAX = 3;
 
 function loadThumb(img, ref) {
-  if (!ref || !ref.path) return; // leave the placeholder
+  // A fileid alone is enough: posters are cached under it, so an archived trip —
+  // whose footage is gone and whose cover therefore has no local path — still
+  // resolves from cache. Only a ref with neither has nothing to look up.
+  if (!ref || (!ref.path && !ref.fileid)) return; // leave the placeholder
   thumbQueue.push([img, ref]);
   pumpThumbs();
 }
@@ -546,6 +549,18 @@ function footActions(t, card) {
   }
   const actions = el("div", "trip-actions");
   const s = t.sync || {};
+  // An archived trip has no raw here, so every action on it is a lie except one:
+  // bring the footage back. Editing especially — the cut clips are still local, but
+  // opening them offers no way to change a single edge, and `Edit →` sitting there
+  // reads as "this trip is ready to work on" when it's the opposite.
+  if (t.state === "archived") {
+    const back = elHTML("button", "btn small primary", '<span class="btn-ico" aria-hidden="true">↓</span> Restore');
+    back.type = "button";
+    back.title = `Bring ${t.name}'s footage back from the cloud`;
+    back.onclick = () => openSync(t, "restoreCloud");
+    actions.append(back);
+    return [el("div", "trip-size tnum", fmtBytes(t.bytes)), actions];
+  }
   // Share is the quick path when you have footage that isn't up yet. Hidden while
   // ops are queued (a rename/move must replay first) — Sync handles those.
   if (owesShare(t)) {
@@ -571,34 +586,59 @@ function footActions(t, card) {
     arch.onclick = () => openArchive(t);
     actions.append(arch);
   }
-  // a trip that's already been cut but still has marks (you added more since) can
-  // cut the new ones — additive, existing clips are left untouched. The fresh cut
-  // is the primary button below when the trip is at the Marked step.
-  if (t.next !== "cut" && t.marks > 0 && t.clips > 0) {
-    const recut = elHTML("button", "btn small ghost", '<span class="btn-ico" aria-hidden="true">✂</span> Cut');
-    recut.type = "button";
-    recut.onclick = () => startCut(t, card);
-    actions.append(recut);
+  // Once a trip has marks, Cut and Edit are both available and their order is
+  // **fixed**: Cut then Edit, always. They used to be placed by pipeline position —
+  // whichever was the "next step" went last, as the primary — so the same two
+  // buttons swapped sides depending on whether the trip had been cut yet, and two
+  // cards side by side disagreed about where Edit lived.
+  //
+  // The pipeline framing is what stopped being true: with the timeline export you
+  // no longer have to cut before you can edit. Cut is an optional deliverable
+  // (standalone files to hand someone), Edit is where the trip is going. So Edit is
+  // the primary and the rightmost from the moment there are marks, and Cut sits to
+  // its left in the same place whether it says "cut these" or "cut the new ones".
+  const marked = t.marks > 0 && (t.masters > 0 || t.clips > 0);
+  if (marked) {
+    const cut = elHTML("button", "btn small ghost", '<span class="btn-ico" aria-hidden="true">✂</span> Cut');
+    cut.type = "button";
+    cut.title = t.clips > 0
+      ? `Cut ${t.name}'s new marks into clips (existing ones are left alone)`
+      : `Cut ${t.name}'s ${plural(t.marks, "mark")} into standalone clips`;
+    cut.onclick = () => startCut(t, card);
+    actions.append(cut);
   }
-  const next = el("button", "btn small primary", NEXT_LABEL[t.next] ?? t.next);
+  const nextKey = marked && t.masters > 0 ? "edit" : t.next;
+  const next = el("button", "btn small primary", NEXT_LABEL[nextKey] ?? nextKey);
   next.type = "button";
   next.onclick =
-    t.next === "review"
+    nextKey === "review"
       ? () => openReview(t)
-      : t.next === "cut"
+      : nextKey === "cut"
         ? () => startCut(t, card)
-        : t.next === "edit"
+        : nextKey === "edit"
           ? () => openInEditor(t)
-          : () => toast(`"${t.next}" for ${t.name} is coming in a later build.`);
+          : () => toast(`"${nextKey}" for ${t.name} is coming in a later build.`);
   actions.append(next);
   return [el("div", "trip-size tnum", fmtBytes(t.bytes)), actions];
 }
 
 function renderTrips(trips) {
   const wrap = $("#trips");
+  const shelf = $("#archived-trips");
   wrap.innerHTML = "";
-  $("#trips-sub").textContent = trips.length ? plural(trips.length, "trip") : "";
+  shelf.innerHTML = "";
   renderShareAll(); // the "Share all" / "Sharing… N left" control in the panel head
+
+  // Archived trips are done with — their raw is in the cloud and there's nothing
+  // here to act on — so they come off the dashboard into a shelf you can open,
+  // rather than padding the grid you actually work in. `state` is written down by
+  // `archive`, not inferred, so nothing lands here by accident.
+  const live = trips.filter((t) => t.state !== "archived");
+  const archived = trips.filter((t) => t.state === "archived");
+
+  $("#trips-sub").textContent = live.length ? plural(live.length, "trip") : "";
+  $("#archived-panel").hidden = archived.length === 0;
+  $("#archived-sub").textContent = archived.length ? plural(archived.length, "trip") : "";
 
   if (!trips.length) {
     wrap.append(
@@ -606,83 +646,102 @@ function renderTrips(trips) {
     );
     return;
   }
-
-  for (const t of trips) {
-    const card = el("div", "trip");
-    card.dataset.trip = t.name; // lets warmShareChips/updateShareChip patch this card
-    card.style.setProperty("--tc", tripColor(t.name));
-
-    const cover = el("div", "cover-wrap");
-    if (t.cover) {
-      const img = el("img", "cover");
-      img.alt = "";
-      cover.append(img);
-      loadThumb(img, t.cover);
-    }
-    // any trip with footage can be skimmed — the cover is the way in
-    if (t.masters > 0) {
-      cover.classList.add("playable");
-      cover.append(elHTML("div", "cover-play", '<span aria-hidden="true">▶</span>'));
-      cover.setAttribute("role", "button");
-      cover.tabIndex = 0;
-      cover.title = `Review ${t.name}`;
-      cover.onclick = () => openReview(t);
-      cover.onkeydown = (e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          openReview(t);
-        }
-      };
-    }
-    card.append(cover);
-
-    const body = el("div", "trip-body");
-
-    const top = el("div", "trip-top");
-    const nameRow = el("div", "trip-name-row");
-    nameRow.append(el("div", "trip-name", t.name));
-    const menuBtn = el("button", "trip-menu", "⋯");
-    menuBtn.type = "button";
-    menuBtn.setAttribute("aria-label", `More actions for ${t.name}`);
-    menuBtn.title = "Organize · rename · move · pull · delete";
-    menuBtn.onclick = (e) => {
-      e.stopPropagation();
-      openTripMenu(menuBtn, t);
-    };
-    nameRow.append(menuBtn);
-    top.append(nameRow);
-    const range = fmtTripRange(t.start, t.end) || (t.from || t.to ? `${t.from ?? "…"} → ${t.to ?? "…"}` : null);
-    if (range) top.append(el("div", "trip-window", range));
-
-    const chips = el("div", "trip-chips");
-    const badge = elHTML("span", "badge", `<span class="dot"></span>${esc(t.state)}`);
-    badge.dataset.state = t.state;
-    chips.append(badge);
-    // live sync state — also shown on archived trips (no local masters) so their
-    // cloud-only footage stays visible
-    if (t.masters > 0 || t.sync.cloudOnly > 0) chips.append(syncChipEl(t));
-    // who this trip's cloud folder is shared with (network-free, from the cache)
-    const sc = sharedChip(t);
-    if (sc) chips.append(sc);
-
-    const stats = el("div", "stats tnum");
-    stats.append(
-      elHTML("div", null, `<span class="n">${t.masters}</span> clips`),
-      elHTML("div", null, `<span class="n">${t.marks}</span> marks`),
-      elHTML("div", null, `<span class="n">${t.clips}</span> cut`)
+  if (!live.length) {
+    wrap.append(
+      el("div", "empty-note", "Everything's archived — your footage is in the cloud. Import a card to start a new trip.")
     );
-
-    const foot = el("div", "trip-foot");
-    foot.append(...footActions(t, card));
-
-    body.append(top, chips);
-    const prov = provRow(t);
-    if (prov) body.append(prov);
-    body.append(stats, foot);
-    card.append(body);
-    wrap.append(card);
   }
+
+  for (const t of live) wrap.append(tripCard(t));
+  for (const t of archived) shelf.append(tripCard(t));
   paintAllShares(); // fill any freshly-rendered upload bars from live progress
+}
+
+function tripCard(t) {
+  const card = el("div", "trip" + (t.state === "archived" ? " is-archived" : ""));
+  card.dataset.trip = t.name; // lets warmShareChips/updateShareChip patch this card
+  card.style.setProperty("--tc", tripColor(t.name));
+
+  const cover = el("div", "cover-wrap");
+  if (t.cover) {
+    const img = el("img", "cover");
+    img.alt = "";
+    cover.append(img);
+    loadThumb(img, t.cover);
+  }
+  // An archived trip keeps its cover (the poster cache outlives the footage) but
+  // has nothing local to play — say so rather than leaving a dead tile.
+  if (t.masters === 0 && t.state === "archived") {
+    cover.title = `${t.name} is archived — bring its footage back to review it`;
+  }
+  // any trip with footage can be skimmed — the cover is the way in
+  if (t.masters > 0) {
+    cover.classList.add("playable");
+    cover.append(elHTML("div", "cover-play", '<span aria-hidden="true">▶</span>'));
+    cover.setAttribute("role", "button");
+    cover.tabIndex = 0;
+    cover.title = `Review ${t.name}`;
+    cover.onclick = () => openReview(t);
+    cover.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        openReview(t);
+      }
+    };
+  }
+  card.append(cover);
+
+  const body = el("div", "trip-body");
+
+  const top = el("div", "trip-top");
+  const nameRow = el("div", "trip-name-row");
+  nameRow.append(el("div", "trip-name", t.name));
+  const menuBtn = el("button", "trip-menu", "⋯");
+  menuBtn.type = "button";
+  menuBtn.setAttribute("aria-label", `More actions for ${t.name}`);
+  menuBtn.title = "Organize · rename · move · pull · delete";
+  menuBtn.onclick = (e) => {
+    e.stopPropagation();
+    openTripMenu(menuBtn, t);
+  };
+  nameRow.append(menuBtn);
+  top.append(nameRow);
+  const range = fmtTripRange(t.start, t.end) || (t.from || t.to ? `${t.from ?? "…"} → ${t.to ?? "…"}` : null);
+  if (range) top.append(el("div", "trip-window", range));
+
+  const chips = el("div", "trip-chips");
+  const badge = elHTML("span", "badge", `<span class="dot"></span>${esc(t.state)}`);
+  badge.dataset.state = t.state;
+  chips.append(badge);
+  // live sync state — also shown on archived trips (no local masters) so their
+  // cloud-only footage stays visible
+  if (t.masters > 0 || t.sync.cloudOnly > 0) chips.append(syncChipEl(t));
+  // who this trip's cloud folder is shared with (network-free, from the cache)
+  const sc = sharedChip(t);
+  if (sc) chips.append(sc);
+
+  const stats = el("div", "stats tnum");
+  // An archived trip has no local masters, so the plain count read "0 clips" — the
+  // one thing that isn't true. Its footage is in the cloud; count it there.
+  const held =
+    t.state === "archived"
+      ? `<span class="n">${t.sync.cloudOnly}</span> in cloud`
+      : `<span class="n">${t.masters}</span> clips`;
+  stats.append(
+    elHTML("div", null, held),
+    elHTML("div", null, `<span class="n">${t.marks}</span> marks`),
+    elHTML("div", null, `<span class="n">${t.clips}</span> cut`)
+  );
+
+  const foot = el("div", "trip-foot");
+  foot.append(...footActions(t, card));
+
+  body.append(top, chips);
+  const prov = provRow(t);
+  if (prov) body.append(prov);
+  body.append(stats, foot);
+  card.append(body);
+  return card;
 }
 
 // ---- share: push a trip's footage to the cloud, with progress inline on the card ----
@@ -960,12 +1019,31 @@ async function startCut(t, card) {
   }
 }
 
-// Hand the trip's cut off to Kdenlive — the pipeline's last step. The editor is
+// Hand the trip off to Kdenlive — the pipeline's last step. The editor is
 // launched detached engine-side, so this returns as soon as it's handed over.
+// Normally that hand-off is a built timeline (every mark, in order, against its
+// master); a trip with no marks still opens its loose files the old way.
 async function openInEditor(t) {
   try {
-    const n = await invoke("open_in_editor", { trip: t.name });
-    toast(`Opening ${plural(n, "clip")} in Kdenlive…`);
+    const r = await invoke("open_in_editor", { trip: t.name });
+    const tl = r.timeline;
+    if (!tl) return toast(`Opening ${plural(r.files, "clip")} in Kdenlive…`);
+    // Name what was left out rather than quietly building a shorter timeline —
+    // a mark whose raw is archived can't be placed, and a silent drop would read
+    // as reel losing it.
+    const bits = [`${plural(tl.segments, "mark")} as a timeline`, fmtTime(tl.duration)];
+    if (tl.skipped) bits.push(`${tl.skipped} skipped (raw missing)`);
+    // Kdenlive's project profile has to be one of its presets. When the footage
+    // matches none — portrait drone video at 23.98 is the real case — it opens at
+    // Kdenlive's *default* instead, quietly rendering the picture at the wrong size
+    // and rate. Nothing downstream would tell you, so it's said here.
+    // Kdenlive won't take a fractional rate on non-standard geometry (portrait drone
+    // footage), so the project is built at the nearest whole rate instead. Small —
+    // well under a frame across a trip — but it's a change to the footage's own
+    // timing, so it's named rather than done quietly.
+    if (tl.conformedFrom) bits.push(`${tl.profile} project (footage is ${tl.conformedFrom})`);
+    else if (!tl.profileId) bits.push(`set the project profile to ${tl.profile} in Kdenlive`);
+    toast(`Opening ${bits.join(" · ")}`);
   } catch (e) {
     toast(String(e));
   }
@@ -1482,8 +1560,12 @@ $("#refresh").addEventListener("click", () => {
 // highlights, label and delete them. Marks key on the MASTER (proxies share its
 // timeline) and persist to marks.tsv exactly as `reel cut` expects.
 
-const HL_PRE = 2,
-  HL_POST = 8; // `h` grabs [now-2s, now+8s], matching the script
+// `h` is pressed *after* something good happens — the moment is behind the
+// playhead, not ahead of it — so the window leans on what you just watched.
+// (Was 2s back / 8s on, inherited from the script, which grabbed mostly footage
+// you hadn't seen yet.)
+const HL_PRE = 8,
+  HL_POST = 2;
 const ICON_PLAY = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
 const ICON_PAUSE =
   '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>';
@@ -1500,7 +1582,7 @@ const P = {
   marks: [], // every mark in the trip, file order
   i: 0, // current clip index
   selected: null, // selected mark index, or null
-  pendingIn: null, // an in-point awaiting its out
+  pendingIn: null, // a started mark awaiting its end
   scrubbing: false,
   seekAfterLoad: null, // seek target applied once the next clip's metadata loads
   srcFor: null, // master path whose source <video> currently holds (see videoReady)
@@ -1513,6 +1595,9 @@ const P = {
   zoneStart: null, // Ctrl+Space plays this segment [start,end]; loop repeats it
   zoneEnd: null,
   zoneLoop: false,
+  zoneMark: null, // index into P.marks, so a running loop can be retrimmed by i/o
+  zoneFree: false, // wrap paused: seeked out of the loop, or parked on an edge
+  zoneEdge: null, // 0/1 while parked on that edge of the mark, else null
 };
 
 function clipUrl(path) {
@@ -1743,7 +1828,9 @@ async function loadClip(i, seekTo = null, dir = 0) {
     }
   }
 
-  if (c.proxied) {
+  if (c.showMaster) {
+    playSrc(c.master, seekTo); // you asked for the real picture on this clip
+  } else if (c.proxied) {
     playSrc(c.play, seekTo); // a clean cached proxy — load it directly
   } else if (c.hasProxy) {
     prepareThenPlay(c, seekTo); // native LRF/LRV present → fast remux, then play
@@ -1812,6 +1899,15 @@ function onVideoError() {
   P.loading = false;
   const c = curClip();
   if (!c) return;
+  if (c.showMaster && c.proxied) {
+    // The master won't decode in the webview (usually HEVC) — which is the whole
+    // reason the proxy exists. Drop back to it instead of calling the clip broken.
+    c.showMaster = false;
+    updateProxyTag();
+    toast("This master won't decode here — back to the proxy.");
+    playSrc(c.play, video.currentTime || null);
+    return;
+  }
   if (c.proxied || c._tried) {
     showStageError("This clip won't play, even as a proxy.");
     return;
@@ -1855,12 +1951,18 @@ function updateProxyTag() {
   const tag = $("#player-proxy");
   if (!c || c.photo) return (tag.hidden = true); // a photo has no proxy/master toggle
   tag.hidden = false;
-  tag.textContent = c.proxied ? "proxy" : "master";
-  tag.classList.toggle("is-proxy", c.proxied);
-  tag.disabled = c.proxied;
-  tag.title = c.proxied
-    ? "Scrubbing a fast proxy"
-    : "Playing the master — click to build a fast proxy if it won't scrub";
+  // The pill names what you're watching, and clicking always moves you to the
+  // other one. It used to go inert the moment a proxy was in play, which read as a
+  // dead button and left no way back to the real picture.
+  const onMaster = !c.proxied || c.showMaster;
+  tag.textContent = onMaster ? "master" : "proxy";
+  tag.classList.toggle("is-proxy", !onMaster);
+  tag.disabled = false;
+  tag.title = !c.proxied
+    ? "Playing the master — click to build a fast proxy if it won't scrub"
+    : onMaster
+      ? "Watching the master at full quality — click for the fast proxy"
+      : "Scrubbing a fast proxy — click to watch the master at full quality";
 }
 
 // ---- transport ----
@@ -1894,14 +1996,14 @@ function setPlayIcon(playing) {
 function nudge(dt) {
   if (!videoReady() || !video.duration) return;
   stopShuttle();
-  clearZone();
+  zoneSeek();
   video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + dt));
 }
 // Jump to the current clip's start (0) or end. `which`: 0 = Home, 1 = End.
 function goToEnds(which) {
   if (!videoReady() || !video.duration) return;
   stopShuttle();
-  clearZone();
+  zoneSeek();
   video.currentTime = which ? Math.max(0, video.duration - 0.05) : 0;
 }
 
@@ -1912,10 +2014,30 @@ function goToEnds(which) {
 const SHUTTLE = [1, 1.5, 2, 3, 5.5, 10];
 let revTimer = null,
   revRate = 0;
+// The speed readout over the picture. Shown only when the transport isn't at
+// normal forward playback: any reverse scrub (the element is *paused* while the
+// picture moves, so the play icon can't say it), and forward from 1.5× up. Plain
+// 1× forward is what the play icon already means, so a "1×" pill sitting there
+// during ordinary playback would be noise.
+function renderShuttle() {
+  const tag = $("#shuttle-tag");
+  const rev = revTimer !== null;
+  const rate = rev ? revRate : video.playbackRate;
+  if (!rev && rate <= 1) {
+    tag.classList.remove("on");
+    tag.hidden = true;
+    return;
+  }
+  tag.hidden = false;
+  tag.innerHTML = "";
+  tag.append(el("span", "sh-dir", rev ? "◂◂" : "▸▸"), el("span", "sh-rate", `${rate}×`));
+  requestAnimationFrame(() => tag.classList.add("on"));
+}
 function stopReverse() {
   if (revTimer) clearInterval(revTimer);
   revTimer = null;
   revRate = 0;
+  renderShuttle();
 }
 function stopShuttle() {
   stopReverse();
@@ -1923,6 +2045,7 @@ function stopShuttle() {
   // on WebKitGTK's GStreamer backend a rate write is a pipeline operation, not a
   // field assignment. Skipping the no-op write costs nothing either way.
   if (video.playbackRate !== 1) video.playbackRate = 1;
+  renderShuttle();
 }
 function pauseShuttle() {
   stopShuttle();
@@ -1954,6 +2077,43 @@ function shuttle(dir) {
       }, 60);
     }
   }
+  renderShuttle();
+}
+
+// ---- stills (s): keep the frame you're looking at ----
+// A still is a capture, not an export — it lands beside its source clip inside the
+// trip and is thereafter an ordinary photo: filmstrip, cloud, dedup, archive. So it
+// joins the strip right here rather than waiting for the next open, at the position
+// the engine will independently sort it to (its mtime is the moment in the footage).
+async function grabStill() {
+  const c = curClip();
+  if (!c || c.photo || c.stub || !videoReady() || !video.duration) return;
+  const t = video.currentTime || 0;
+  let s;
+  try {
+    s = await invoke("grab_still", { master: c.master, t });
+  } catch (e) {
+    return toast(String(e));
+  }
+  const at = P.clips.findIndex((x) => x.master === c.master);
+  if (at >= 0 && !P.clips.some((x) => x.master === s.path)) {
+    P.clips.splice(at + 1, 0, {
+      master: s.path,
+      play: s.path,
+      poster: s.path,
+      name: s.name,
+      fileid: s.fileid,
+      bytes: s.bytes,
+      captured: (c.captured || 0) + Math.floor(t),
+      proxied: false,
+      hasProxy: false,
+      stub: false,
+      photo: true,
+      person: c.person,
+    });
+    renderFilmstrip();
+  }
+  toast(`Still saved — ${s.name}`);
 }
 
 // ---- zone (Ctrl+Space play / Ctrl+Shift+Space loop): review one segment ----
@@ -1983,10 +2143,129 @@ function clearZone() {
   disarmZone();
   P.zoneStart = P.zoneEnd = null;
   P.zoneLoop = false;
+  P.zoneMark = null;
+  P.zoneFree = false;
+  P.zoneEdge = null;
+  renderZone();
+}
+
+// Seeking while a loop runs isn't "abandon the loop" — it's how you reach a point
+// *outside* the current range in order to grow it. So the zone survives the seek
+// and only the wrap is suspended, until i/o sets the new edge. Without this the
+// playhead could never leave [start, end], so retrimming could only ever shrink a
+// mark — never extend one.
+function zoneSeek() {
+  if (P.zoneEnd == null || !P.zoneLoop) return clearZone();
+  P.zoneFree = true;
+  P.zoneEdge = null;
+  renderZone();
+}
+
+// The segment readout. A loop with no indicator is just a clip that mysteriously
+// won't end, so it says what's repeating — and, since the point of watching a
+// segment on repeat is to fix its edges, that i/o will retrim it.
+function renderZone() {
+  const tag = $("#zone-tag");
+  if (P.zoneEnd == null) {
+    tag.classList.remove("on");
+    tag.hidden = true;
+    return;
+  }
+  tag.hidden = false;
+  tag.innerHTML = "";
+  const m = P.marks[P.zoneMark];
+  const parked = P.zoneEdge != null;
+  tag.append(
+    el("span", "zn-ico", parked ? "⏸" : P.zoneLoop ? "⟳" : "▸"),
+    el("span", "zn-span tnum", `${fmtTime(P.zoneStart)} – ${fmtTime(P.zoneEnd)}`)
+  );
+  if (m?.label) tag.append(el("span", "zn-name", m.label));
+  if (P.zoneMark != null) {
+    tag.append(
+      el(
+        "span",
+        "zn-hint",
+        parked
+          ? `${P.zoneEdge === 0 ? "start" : "end"} · ctrl shift space to loop`
+          : "shift ←→ start · ctrl ←→ end"
+      )
+    );
+  }
+  requestAnimationFrame(() => tag.classList.add("on"));
+}
+
+// How far one trim keypress moves an edge. Coarse enough that a few taps reshape a
+// highlight, fine enough to land a cut where you want it; `i`/`o` remain the way to
+// jump an edge straight to the playhead.
+const TRIM_STEP = 0.5;
+
+// Walk one edge of the looping mark. `edge`: 0 = start, 1 = end. Parks the picture
+// *paused on that edge* so you see the exact frame it lands on — the whole reason
+// to nudge rather than set-at-playhead. Ctrl+Shift+Space picks the loop back up.
+function nudgeEdge(edge, dir) {
+  const m = P.marks[P.zoneMark];
+  if (!m || !video.duration) return;
+  const step = TRIM_STEP * dir;
+  if (edge === 0) m.start = Math.max(0, Math.min(m.end - 0.1, m.start + step));
+  else m.end = Math.min(video.duration, Math.max(m.start + 0.1, m.end + step));
+
+  P.zoneStart = m.start;
+  P.zoneEnd = m.end;
+  // Suspend the wrap: parking on the end would otherwise trip the loop tick and
+  // fling the playhead back to the start, so you'd never see the frame you set.
+  P.zoneFree = true;
+  P.zoneEdge = edge;
+  P.selected = P.zoneMark; // so Ctrl+Shift+Space resumes *this* mark, not another
+  video.pause();
+  video.currentTime = edge === 0 ? m.start : m.end;
+  renderMarks();
+  renderScrubMarks();
+  updateFilmstripActive();
+  renderZone();
+  scheduleSave();
+}
+
+// While a loop is running, i/o move *that* mark's edges instead of starting a new
+// one. Watching a segment repeat is how you find the right in and out, so the keys
+// that set them should apply to what you're watching.
+function trimLoop(edge) {
+  const m = P.marks[P.zoneMark];
+  if (!m) return false;
+  const t = video.currentTime || 0;
+  if (edge === 0) {
+    if (t >= m.end - 0.05) {
+      toast("The start has to land before the end of the loop.");
+      return true;
+    }
+    m.start = t;
+  } else {
+    if (t <= m.start + 0.05) {
+      toast("The end has to land after the start of the loop.");
+      return true;
+    }
+    m.end = t;
+  }
+  // The loop tick reads these, so it picks up the new edges on the next wrap —
+  // moving the out-point under the playhead restarts it immediately, which is the
+  // confirmation you want.
+  P.zoneStart = m.start;
+  P.zoneEnd = m.end;
+  P.zoneFree = false;
+  P.zoneEdge = null;
+  P.selected = P.zoneMark;
+  renderMarks();
+  renderScrubMarks();
+  updateFilmstripActive();
+  renderZone();
+  scheduleSave();
+  // Play the new range back from the top — that's the confirmation you trimmed for.
+  video.currentTime = m.start;
+  video.play().catch(() => {});
+  return true;
 }
 function playZone(loop) {
   const z = currentZone();
-  if (!z) return toast("No segment to play — set one with i / o, or pick it in Marks.");
+  if (!z) return toast("No segment to play — mark one with h, or i / o, then try again.");
   const start = () => {
     // Armed off a `canplay`, which also re-fires after a re-buffer — so confirm the
     // element really is holding the clip this zone belongs to before seeking it.
@@ -1996,6 +2275,11 @@ function playZone(loop) {
     P.zoneStart = z.start;
     P.zoneEnd = z.end;
     P.zoneLoop = loop;
+    const mi = P.marks.indexOf(z);
+    P.zoneMark = mi >= 0 ? mi : null;
+    P.zoneFree = false;
+    P.zoneEdge = null;
+    renderZone();
     video.play().catch(() => {});
   };
   const c = curClip();
@@ -2031,16 +2315,34 @@ function gotoAdjacentMark(dir) {
       : [...ordered].reverse().find((x) => x.ci < ci || (x.ci === ci && x.start < t - 0.15));
   if (target) goToMark(target.i);
 }
+// What the zone tick owes at time `t`. Pure, and separate, because inline it was
+// wrong twice: once by wrapping a playhead that had deliberately been seeked out
+// past the end (so a mark could only ever be shrunk), and once by *destroying* a
+// one-shot zone the moment a ctrl+→ parked the playhead on its end — after which
+// the next ctrl+→ found no zone and hopped to a different mark instead.
+//
+// `free` is the whole point: it means the playhead is out here on purpose —
+// parked on an edge you're trimming, or hunting for a new one — and neither the
+// wrap nor the stop should touch it. That applies to a one-shot zone exactly as
+// much as to a loop.
+function zoneAction(t, z) {
+  if (z.zoneEnd == null || t < z.zoneEnd) return "none";
+  if (z.zoneFree) return "none";
+  return z.zoneLoop ? "wrap" : "stop";
+}
+
 function updateTime() {
   const d = video.duration || 0,
     t = video.currentTime || 0;
   // zone play/loop: stop (or loop back) when the playhead reaches the zone's end
-  if (P.zoneEnd != null && t >= P.zoneEnd) {
-    if (P.zoneLoop) video.currentTime = P.zoneStart;
-    else {
+  switch (zoneAction(t, P)) {
+    case "wrap":
+      video.currentTime = P.zoneStart;
+      break;
+    case "stop":
       video.pause();
       clearZone();
-    }
+      break;
   }
   $("#time").textContent = `${fmtTime(t)} / ${fmtTime(d)}`;
   const f = d ? t / d : 0;
@@ -2060,18 +2362,19 @@ function seekFromEvent(e) {
   const f = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
   if (!videoReady() || !video.duration) return;
   stopShuttle();
-  clearZone();
+  zoneSeek();
   video.currentTime = f * video.duration;
 }
 
 // ---- marking ----
-// A pending in-point arms the "o out" key hint (in the trip's colour) so the
-// next step reads off the TUI strip; cleared when the segment closes or undoes.
+// A pending start arms the "o end" key hint (in the trip's colour) so the next
+// step reads off the strip; cleared when the mark closes or undoes.
 function armPending(on) {
   $("#hint-out")?.classList.toggle("armed", on);
 }
 function markIn() {
   if (!video.duration) return;
+  if (P.zoneLoop && trimLoop(0)) return;
   P.pendingIn = video.currentTime;
   armPending(true);
   updateTime();
@@ -2079,7 +2382,8 @@ function markIn() {
 function markOut() {
   const c = curClip();
   if (!c) return;
-  if (P.pendingIn == null) return toast("No in-point yet — press i first.");
+  if (P.zoneLoop && trimLoop(1)) return;
+  if (P.pendingIn == null) return toast("Nothing started yet — press i first, or h to keep the last few seconds.");
   let s = P.pendingIn,
     e = video.currentTime;
   if (e < s) [s, e] = [e, s];
@@ -2199,7 +2503,9 @@ function renderMarks() {
   list.innerHTML = "";
   $("#marks-empty").hidden = P.marks.length > 0;
   $("#marks-sub").textContent = P.marks.length ? plural(P.marks.length, "segment") : "";
-  $("#player-mark-count").textContent = P.marks.length ? plural(P.marks.length, "mark") : "no marks";
+  // The count rides on the button that opens them — one control, not a readout
+  // sitting beside a button that says the same thing.
+  $("#player-list").textContent = P.marks.length ? `Marks · ${P.marks.length}` : "Marks";
   P.marks.forEach((m, idx) => {
     const ci = P.clips.findIndex((c) => c.master === m.master);
     const row = el("div", `mark-row${idx === P.selected ? " sel" : ""}`);
@@ -2410,9 +2716,25 @@ function toggleMarksPanel() {
 // ---- wiring ----
 $("#player-back").addEventListener("click", closeReview);
 $("#player-list").addEventListener("click", toggleMarksPanel);
+
+// ---- the keys panel (?) ----
+// Holds everything the hint bar no longer shows, plus what a mark actually is.
+const keysDlg = $("#keys-dialog");
+function openKeys() {
+  if (!keysDlg.open) keysDlg.showModal();
+}
+$("#keys-close").addEventListener("click", () => keysDlg.close());
+keysDlg.addEventListener("click", (e) => {
+  if (e.target === keysDlg) keysDlg.close();
+});
 $("#player-proxy").addEventListener("click", () => {
   const c = curClip();
-  if (c && !c.proxied) prepareThenPlay(c, video.currentTime || null);
+  if (!c) return;
+  const at = video.currentTime || null;
+  if (!c.proxied) return prepareThenPlay(c, at); // nothing to switch to yet — build it
+  c.showMaster = !c.showMaster;
+  updateProxyTag();
+  playSrc(c.showMaster ? c.master : c.play, at);
 });
 $("#play").addEventListener("click", togglePlay);
 
@@ -2429,6 +2751,9 @@ video.addEventListener("timeupdate", () => {
 video.addEventListener("play", () => setPlayIcon(true));
 video.addEventListener("pause", () => setPlayIcon(false));
 video.addEventListener("ended", () => {
+  // A forward shuttle that runs off the end of the *last* clip has no loadClip to
+  // reset it, so the rate (and its readout) would stick around on a stopped picture.
+  stopShuttle();
   const next = nextPlayable(P.i + 1, 1);
   if (next >= 0) loadClip(next, null, 1);
 });
@@ -2633,38 +2958,45 @@ document.addEventListener("keydown", (e) => {
     if (e.key === " ") {
       e.preventDefault();
       playZone(e.shiftKey); // Ctrl+Space play zone, +Shift loop
-    } else if (e.key === "ArrowLeft") {
+    } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
       e.preventDefault();
-      gotoAdjacentMark(-1);
-    } else if (e.key === "ArrowRight") {
-      e.preventDefault();
-      gotoAdjacentMark(1);
+      const d = e.key === "ArrowRight" ? 1 : -1;
+      // A live zone claims ctrl+arrows for its *end*. Hopping to the next mark
+      // isn't what you're doing while one is up on screen being trimmed.
+      if (P.zoneMark != null) nudgeEdge(1, d);
+      else gotoAdjacentMark(d);
     }
     return;
   }
   // Card preview is read-only: transport keys still work, but the mark/edit
-  // keys (in/out/highlight/undo/label/marks/move/delete) do nothing.
-  if (P.preview && "iohuexm".includes(e.key)) return;
+  // keys (start/end/highlight/undo/name/marks/move/delete/still) do nothing — a
+  // card isn't a trip, so there's nowhere for a still to belong yet. `M` is
+  // shift+m (move), which `e.key` reports uppercase.
+  if (P.preview && "iohuexmsM".includes(e.key)) return;
   if (P.preview && (e.key === "Delete" || e.key === "Backspace")) {
     e.preventDefault();
     return;
   }
-  // A photo has no timeline: the mark/scrub-edit keys do nothing (but Move and
+  // A photo has no timeline: the mark/scrub-edit keys do nothing (but shift+m and
   // Delete still work — a photo can be relocated or discarded like any capture).
-  if (curClip()?.photo && "iohuex".includes(e.key)) return;
+  // `s` joins them: there's no frame to grab from a picture that already is one.
+  // `m` too, since the Marks button is hidden on a photo (see style.css).
+  if (curClip()?.photo && "iohuexsm".includes(e.key)) return;
   switch (e.key) {
     case " ":
       e.preventDefault();
       togglePlay();
       break;
     case "ArrowLeft":
+    case "ArrowRight": {
       e.preventDefault();
-      nudge(e.shiftKey ? -1 : -5);
+      const d = e.key === "ArrowRight" ? 1 : -1;
+      // With a zone up, shift+arrows walk its *start* (ctrl walks the end); without
+      // one they stay the fine 1s seek. Plain arrows always seek.
+      if (e.shiftKey && P.zoneMark != null) nudgeEdge(0, d);
+      else nudge(d * (e.shiftKey ? 1 : 5));
       break;
-    case "ArrowRight":
-      e.preventDefault();
-      nudge(e.shiftKey ? 1 : 5);
-      break;
+    }
     case "j": // shuttle reverse (ramps −1×…−10×)
       shuttle(-1);
       break;
@@ -2691,6 +3023,13 @@ document.addEventListener("keydown", (e) => {
     case "h":
       highlight();
       break;
+    case "s":
+      grabStill();
+      break;
+    case "?": // help is never read-only — works in card preview and on photos too
+      e.preventDefault();
+      openKeys();
+      break;
     case "u":
       undo();
       break;
@@ -2699,10 +3038,15 @@ document.addEventListener("keydown", (e) => {
       labelLast();
       break;
     case "x":
-      toggleMarksPanel();
+      // sits with ⌫/del: same action, whichever hand is free
+      e.preventDefault();
+      if (P.selected != null) deleteMark(P.selected);
       break;
     case "m":
-      // Without this the keypress's default action lands an "m" in the trip-pick
+      toggleMarksPanel();
+      break;
+    case "M":
+      // shift+m. Without preventDefault the keypress lands an "M" in the trip-pick
       // input the dialog focuses (same reason `e` above preventDefaults).
       e.preventDefault();
       moveCurrentClip();
@@ -2914,8 +3258,6 @@ function menuEsc(e) {
   }
 }
 function openTripMenu(anchor, t, opts = {}) {
-  closeMenu();
-  const menu = el("div", "menu");
   const items = [{ label: "Rename…", run: () => renameTrip(t) }];
   if (t.masters > 0) {
     // already inside the board — no point offering to open it again
@@ -2926,6 +3268,13 @@ function openTripMenu(anchor, t, opts = {}) {
   items.push({ label: "Sharing…", run: () => openShare(t) });
   items.push({ sep: true });
   items.push({ label: "Delete trip…", danger: true, run: () => deleteTripConfirm(t) });
+  openMenu(anchor, items);
+}
+
+/// A dropdown anchored under `anchor`. Items are `{label, run, danger}` or `{sep}`.
+function openMenu(anchor, items) {
+  closeMenu();
+  const menu = el("div", "menu");
   for (const it of items) {
     if (it.sep) {
       menu.append(el("div", "menu-sep"));
@@ -2948,6 +3297,17 @@ function openTripMenu(anchor, t, opts = {}) {
   openMenuEl = menu;
   setTimeout(() => document.addEventListener("click", closeMenu), 0);
   document.addEventListener("keydown", menuEsc, true);
+}
+
+// The player's ⋯ — the same affordance a trip card uses, holding the two clip-level
+// actions that used to sit permanently in the header as a button and a trash icon.
+function openPlayerMenu(anchor) {
+  if (!curClip()) return;
+  openMenu(anchor, [
+    { label: "Move to trip…", run: () => moveCurrentClip() },
+    { sep: true },
+    { label: "Delete clip…", danger: true, run: () => deleteCurrentClip() },
+  ]);
 }
 
 async function renameTrip(t) {
@@ -3068,8 +3428,10 @@ function dropClipFromPlayer(i) {
   renderMarks();
   loadClip(Math.min(i, P.clips.length - 1), null, 1);
 }
-$("#player-move").addEventListener("click", moveCurrentClip);
-$("#player-trash").addEventListener("click", deleteCurrentClip);
+$("#player-menu").addEventListener("click", (e) => {
+  e.stopPropagation();
+  openPlayerMenu($("#player-menu"));
+});
 
 // ============================ organize board ============================
 // The whole library as lanes — one per trip, each holding that trip's clips.
@@ -3991,9 +4353,14 @@ const SYNC_GROUPS = [
   },
 ];
 
-async function openSync(t) {
+// `preselect` ticks one action's box on arrival — used by an archived trip's
+// Restore button, which would otherwise land you on a panel whose only checkbox
+// is deliberately off by default.
+let syncPreselect = null;
+async function openSync(t, preselect = null) {
   syncTrip = t;
   syncData = null;
+  syncPreselect = preselect;
   $("#sync-title").textContent = `Sync ${t.name}`;
   $("#sync-meta").textContent = "Checking the cloud…";
   $("#sync-list").innerHTML = "";
@@ -4048,7 +4415,8 @@ function renderSync() {
       // Additive-and-expected legs are on by default. The two that aren't: deleting
       // cloud copies is destructive, and bringing footage back re-fills disk you
       // freed on purpose — neither should ride along on a click of Sync.
-      cb.checked = g.act !== "pushDeletions" && g.act !== "restoreCloud";
+      cb.checked =
+        g.act === syncPreselect || (g.act !== "pushDeletions" && g.act !== "restoreCloud");
       syncActions[g.act] = cb.checked;
       cb.onchange = () => (syncActions[g.act] = cb.checked);
       anyAction = true;

@@ -9,8 +9,9 @@ REEL_LOG := $(or $(XDG_STATE_HOME),$(HOME)/.local/state)/reel/log/reel.jsonl
 run: ## launch the app (debug build)
 	cargo run -p reel-tauri
 
-test: ## engine tests — headless, fast, no GUI deps
+test: ## engine + UI-logic tests — headless, fast, no GUI deps
 	cargo test -p reel-core
+	node tests/zone.test.mjs
 
 logs: ## follow the app log (UI + engine, newest last)
 	@tail -n 50 -F $(REEL_LOG)

@@ -657,6 +657,66 @@ pub struct ArchiveResult {
     pub masters: usize,
 }
 
+/// A frame grabbed from a master and kept as a photo capture beside it.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StillResult {
+    /// Absolute path to the new JPEG.
+    pub path: String,
+    /// Its basename, for the toast and the filmstrip caption.
+    pub name: String,
+    /// Content id, so the UI can request its poster like any other capture.
+    pub fileid: String,
+    pub bytes: u64,
+}
+
+/// What `edit` handed to Kdenlive. Either a built timeline (the good path) or a
+/// count of loose files (the fallback for a trip with no marks, or an archived one
+/// with only its cut left).
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct EditResult {
+    /// Files handed over — `1` when that file is the project.
+    pub files: usize,
+    /// The project that was built, when one was.
+    pub timeline: Option<TimelineResult>,
+}
+
+/// Where a trip's marks landed as a Kdenlive timeline. The counterpart to
+/// `CutResult`: `cut` reports files written, this reports one project holding every
+/// mark as a clip that can still be re-trimmed against its master.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineResult {
+    pub trip: String,
+    /// Absolute path of the `.kdenlive` project.
+    pub path: String,
+    /// Marks placed on the timeline.
+    pub segments: usize,
+    /// Distinct masters the timeline references.
+    pub sources: usize,
+    /// Marks left out because their master is missing or unreadable — an archived
+    /// trip's raw, or the odd file the camera never finished writing.
+    pub skipped: usize,
+    /// Timeline length in seconds.
+    pub duration: f64,
+    /// The project's video format, e.g. `3840×2160 · 23.98 fps`.
+    pub profile: String,
+    /// The stock MLT profile Kdenlive will open the project in (`uhd_2160p_2398`).
+    /// `None` when the footage matches no stock profile — portrait drone video at
+    /// 23.98 is the real case. Kdenlive then opens at *its* default rather than the
+    /// footage's own format, which is worth saying out loud: nothing else would
+    /// tell you, and the picture just quietly comes out the wrong shape.
+    pub profile_id: Option<String>,
+    /// Set when the project's frame rate was rounded because the footage's real rate
+    /// has no standard Kdenlive profile — holds the footage's actual format, e.g.
+    /// `1080×1920 · 23.98 fps`. Kdenlive refuses a fractional rate on non-standard
+    /// geometry with a modal on every open, so the rate is conformed to the nearest
+    /// integer (0.1%, under a frame across a 30 s timeline) and every frame position
+    /// is computed against it. Worth surfacing: it's a real, if small, compromise.
+    pub conformed_from: Option<String>,
+}
+
 /// Streamed while cutting a trip — one per marked segment as ffmpeg starts on it,
 /// so the UI can name the clip being written and tick a bar by segment count.
 #[derive(Serialize, Clone, Debug)]

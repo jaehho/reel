@@ -28,9 +28,11 @@ pub mod review;
 pub mod serve;
 pub mod sessions;
 pub mod share;
+pub mod still;
 pub mod store;
 pub mod sync;
 pub mod thumbs;
+pub mod timeline;
 pub mod trips;
 pub mod wipe;
 
@@ -44,10 +46,11 @@ pub use import::import_window;
 pub use model::{
     ArchivePlan, ArchiveProgress, ArchiveResult, CardInfo, ClipHealth, ClipRef, Contributor,
     CutProgress, CutResult, DeleteResult, DupCopy, DupGroup, DupLoc, DupProgress, DupReport,
-    DupResolution, DupResolveResult, ImportProgress, ImportResult, Mark, MoveResult, Playlist,
-    PullProgress, PullResult, PushPhase, PushProgress, PushResult, ReclaimPlan, ReclaimResult,
-    RestoreResult, ReviewClip, Session, Share, Sharee, SyncActions, SyncBrief, SyncItem, SyncPhase,
-    SyncProgress, SyncResult, Trip, TripShare, TripState, TripSync, WipePhase, WipeProgress,
+    DupResolution, DupResolveResult, EditResult, ImportProgress, ImportResult, Mark, MoveResult,
+    Playlist, PullProgress, PullResult, PushPhase, PushProgress, PushResult, ReclaimPlan,
+    ReclaimResult, RestoreResult, ReviewClip, Session, Share, Sharee, StillResult, SyncActions,
+    SyncBrief, SyncItem, SyncPhase, SyncProgress, SyncResult, TimelineResult, Trip, TripShare,
+    TripState, TripSync, WipePhase, WipeProgress,
 };
 pub use organize::{merge_trips, move_clips, rename_trip};
 pub use proxy::{ensure_card_proxy, ensure_proxy};
@@ -59,6 +62,8 @@ pub use review::{card_playlist, review_playlist, save_marks};
 pub use share::{
     add_share, known_sharees, list_shares, remove_share, search_sharees, sharing_available,
 };
+pub use still::grab_still;
 pub use sync::{reconcile, reconcile_all, sync_status, trips_in_cloud};
+pub use timeline::build_timeline;
 pub use trips::list_trips;
 pub use wipe::{commit_reclaim, plan_reclaim};

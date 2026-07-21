@@ -1,7 +1,8 @@
 //! Free a trip's local raw footage once it's safe in the shared cloud: confirm
 //! every master is in the cloud, then delete the per-person camera trees (plus
 //! `_sheets/`/`.proxies/`), keeping the cut clips, marks, and `.reel`. The trip
-//! then reads "Archived" and its raw can be re-pulled. Mirrors the script's
+//! then reads "Archived" (recorded in `.reel`, see `commit_archive`), is filed
+//! away from the dashboard, and its raw can be re-pulled. Mirrors the script's
 //! `archive`.
 //!
 //! Two steps, like `wipe`: `plan_archive` verifies and reports what would be
@@ -146,6 +147,12 @@ pub fn commit_archive(
     }
     // a leftover play-state file the script also clears
     let _ = fs::remove_file(dir.join(".reel-play.tsv"));
+    // Record the archive as an *intent*. Inferring it from "no masters + some
+    // clips" can't tell a deliberate archive from footage lost by accident, reads a
+    // trip archived before it was ever cut as merely Empty, and would be wrong
+    // again for any trip holding a still or a photo. Since the dashboard now files
+    // archived trips away, that guess is load-bearing — so it gets written down.
+    let _ = crate::trips::set_trip_meta(&dir, "archived", "1");
     Ok(ArchiveResult {
         trip: trip.to_string(),
         freed,

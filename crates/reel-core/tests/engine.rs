@@ -3259,3 +3259,810 @@ fn concurrent_state_updates_dont_lose_rows() {
         lost_rows.len()
     );
 }
+
+// ---- stills: a grabbed frame is an ordinary capture ----
+
+/// The ffmpeg decode is skipped when the frame already exists (the grab is
+/// idempotent per millisecond), which lets the rest of the contract — ledger row,
+/// filmstrip ordering, discovery as a capture — be tested without a real video.
+#[test]
+fn a_grabbed_still_joins_the_trip_as_a_capture() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("lib");
+    let state = d.path().join("state");
+    let c = cfg(&lib, &state, None);
+
+    let master = lib.join("DOHA/jaeho/DJI/DJI_0030_D.MP4");
+    touch(&master, 0xAB, 5_000_000, 1_700_000_000);
+    // stand in for the ffmpeg output at exactly the path grab_still derives
+    let still = lib.join("DOHA/jaeho/DJI/DJI_0030_D_t12480.jpg");
+    touch(&still, 0x11, 4096, 1);
+
+    let r = reel_core::grab_still(&c, &master, 12.48).unwrap();
+    assert_eq!(r.name, "DJI_0030_D_t12480.jpg");
+    assert_eq!(r.path, still.to_string_lossy());
+
+    // ledgered under the master's own trip/person/camera, so it's tracked like an import
+    let row = Ledger::load(&c.ledger_path()).row_of(&r.fileid).cloned();
+    let row = row.expect("a still must be recorded on the ledger");
+    assert_eq!(
+        (row.trip.as_str(), row.person.as_str(), row.camera.as_str()),
+        ("DOHA", "jaeho", "DJI")
+    );
+
+    // mtime = the moment in the footage, so masters_in sorts it right after its source
+    assert_eq!(captured_at(&still), 1_700_000_012);
+    let found = reel_core::media::masters_in(&lib.join("DOHA"));
+    assert_eq!(
+        found,
+        vec![master.clone(), still.clone()],
+        "the still must be discovered as a capture, ordered after its source"
+    );
+
+    // a repeat grab of the same frame is the same file, not a second picture
+    let again = reel_core::grab_still(&c, &master, 12.4801).unwrap();
+    assert_eq!(again.path, r.path);
+    assert_eq!(reel_core::media::masters_in(&lib.join("DOHA")).len(), 2);
+}
+
+#[test]
+fn a_still_is_refused_outside_the_library() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("lib");
+    let state = d.path().join("state");
+    fs::create_dir_all(&lib).unwrap();
+    let c = cfg(&lib, &state, None);
+
+    let outside = d.path().join("elsewhere/DJI_0001.MP4");
+    touch(&outside, 0xAB, 1000, 1_700_000_000);
+    let err = reel_core::grab_still(&c, &outside, 1.0).unwrap_err();
+    assert!(err.contains("isn't in the library"), "got: {err}");
+}
+
+// ---- archived is an intent, not an inference ----
+
+/// The case the old "no masters + some clips" guess could never see: freeing a
+/// trip you never cut. That read as `Empty` — indistinguishable from a trip with
+/// nothing in it — which, now that archived trips are filed off the dashboard,
+/// would quietly lose the trip instead of just mislabelling it.
+#[test]
+fn an_archive_with_no_cut_clips_still_reads_as_archived() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    let c = cfg(&lib, &state, None);
+
+    let trip = lib.join("bali");
+    fs::create_dir_all(&trip).unwrap();
+    fs::write(trip.join(".reel"), "reel project\narchived=1\n").unwrap();
+
+    assert_eq!(list_trips(&c)[0].state, TripState::Archived);
+}
+
+/// A library archived before the marker existed must not read as `Empty` after the
+/// upgrade — the old inference stays as a fallback.
+#[test]
+fn a_trip_archived_before_the_marker_still_reads_as_archived() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    let c = cfg(&lib, &state, None);
+
+    let trip = lib.join("bali");
+    fs::create_dir_all(&trip).unwrap();
+    fs::write(trip.join(".reel"), "reel project\n").unwrap(); // no archived= line
+    touch(&trip.join("clips/DJI_0001_c01.mp4"), 7, 2000, 1_700_000_000);
+
+    assert_eq!(list_trips(&c)[0].state, TripState::Archived);
+}
+
+/// A stale marker must not strand a trip whose footage is back: `restore` clears
+/// it, but the state ignores it while masters exist either way.
+#[test]
+fn footage_on_disk_overrides_a_stale_archived_marker() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    let c = cfg(&lib, &state, None);
+
+    let trip = lib.join("bali");
+    fs::create_dir_all(&trip).unwrap();
+    fs::write(trip.join(".reel"), "reel project\narchived=1\n").unwrap();
+    touch(
+        &trip.join("jaeho/dji/DJI_0001.MP4"),
+        1,
+        2_000_000,
+        1_700_000_000,
+    );
+
+    let t = &list_trips(&c)[0];
+    assert_eq!(t.state, TripState::Imported, "raw is back — not archived");
+}
+
+/// An archived trip kept its cover and dates: the ledger remembers every capture
+/// and the poster cache is keyed by content id *outside* the trip, so freeing the
+/// disk shouldn't blank the card as though the footage never existed.
+#[test]
+fn an_archived_trip_keeps_its_cover_and_dates() {
+    use reel_core::ledger::LedgerRow;
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    let c = cfg(&lib, &state, None);
+
+    let trip = lib.join("bali");
+    fs::create_dir_all(&trip).unwrap();
+    fs::write(trip.join(".reel"), "reel project\narchived=1\n").unwrap();
+
+    // what the ledger still knows about footage that's no longer on disk
+    Ledger::update(&c.ledger_path(), |l| {
+        for (i, at) in [1_700_000_900i64, 1_700_000_100, 1_700_000_500]
+            .into_iter()
+            .enumerate()
+        {
+            l.upsert(LedgerRow {
+                id: format!("id-{i}"),
+                trip: "bali".into(),
+                person: "jaeho".into(),
+                camera: "dji".into(),
+                base: format!("DJI_000{i}.MP4"),
+                bytes: "2000000".into(),
+                captured: at.to_string(),
+                imported_at: "0".into(),
+            });
+        }
+    })
+    .unwrap();
+
+    let t = &list_trips(&c)[0];
+    assert_eq!(t.state, TripState::Archived);
+    assert_eq!(
+        t.cover.as_ref().map(|x| x.fileid.as_str()),
+        Some("id-1"),
+        "cover is the earliest capture, by the id its poster is cached under"
+    );
+    assert_eq!(
+        t.start,
+        Some(1_700_000_100),
+        "trip still knows when it began"
+    );
+    assert_eq!(t.end, Some(1_700_000_900), "and when it ended");
+}
+
+// ---- kdenlive timeline: every mark on one editable project ----
+
+/// The arithmetic the whole export rests on. Seconds in `marks.tsv` become frame
+/// numbers in MLT, and MLT's `out` is *inclusive* — so a naive `end - start`
+/// loses a frame on every segment, and a naive `fps = 30` misplaces every mark on
+/// footage that isn't 30 fps. Both are silent failures: the timeline still opens,
+/// it's just wrong. Rate here is 24000/1001, which is what every DJI master in
+/// this library actually reports.
+#[test]
+fn a_marks_seconds_become_inclusive_frames_at_the_masters_real_rate() {
+    use reel_core::timeline::segment_of;
+    let fps = 24000.0 / 1001.0; // 23.976…
+    let m = Path::new("/lib/party/jaeho/dji/DJI_0004.MP4");
+    let s = segment_of(m, "hl", 70.920, 80.920, fps, 30_000);
+
+    assert_eq!(
+        (s.in_f, s.out_f),
+        (1700, 1939),
+        "start/end land on the frames the player was showing"
+    );
+    assert_eq!(
+        s.frames(),
+        240,
+        "inclusive out: a 10s mark is 240 frames at 23.976, not 239"
+    );
+}
+
+/// A mark can outlive its source — the trip's raw was replaced by a shorter
+/// re-encode, or the mark was written against a file the camera never finished.
+/// Clamping keeps the segment inside the media; extrapolating past it produces a
+/// project Kdenlive opens with a red "invalid duration" clip.
+#[test]
+fn a_mark_past_the_end_of_its_master_is_clamped_not_extrapolated() {
+    use reel_core::timeline::segment_of;
+    let m = Path::new("/lib/t/p/c.MP4");
+    let s = segment_of(m, "", 1.0, 999.0, 30.0, 100); // source is frames 0..99
+    assert_eq!(s.out_f, 99, "never past the last frame");
+    assert!(s.in_f <= s.out_f, "and never inverted");
+
+    // A zero-width mark is still a clip, not a zero-frame hole in the playlist.
+    let z = segment_of(m, "", 5.0, 5.0, 30.0, 1000);
+    assert_eq!(z.frames(), 1);
+}
+
+/// `marks.tsv` is in whatever order the player last wrote it. A timeline that
+/// jumps around in time reads as a bug even when every segment is correct, so the
+/// export re-sorts by when the footage was shot.
+#[test]
+fn the_timeline_runs_in_capture_order_not_file_order() {
+    use reel_core::model::Mark;
+    use reel_core::timeline::order_marks;
+    use std::collections::HashMap;
+
+    let mk = |p: &str, start: f64| Mark {
+        master: p.to_string(),
+        start,
+        end: start + 5.0,
+        label: "hl".into(),
+    };
+    // written newest-first, and the middle clip has two marks out of order
+    let mut marks = vec![
+        mk("/lib/t/late.MP4", 1.0),
+        mk("/lib/t/mid.MP4", 40.0),
+        mk("/lib/t/mid.MP4", 10.0),
+        mk("/lib/t/early.MP4", 1.0),
+    ];
+    let captured: HashMap<PathBuf, i64> = [
+        (PathBuf::from("/lib/t/early.MP4"), 1_700_000_000),
+        (PathBuf::from("/lib/t/mid.MP4"), 1_700_000_500),
+        (PathBuf::from("/lib/t/late.MP4"), 1_700_000_900),
+    ]
+    .into_iter()
+    .collect();
+
+    order_marks(&mut marks, &captured);
+    let order: Vec<(&str, f64)> = marks
+        .iter()
+        .map(|m| (m.master.rsplit('/').next().unwrap(), m.start))
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            ("early.MP4", 1.0),
+            ("mid.MP4", 10.0),
+            ("mid.MP4", 40.0),
+            ("late.MP4", 1.0)
+        ],
+        "by capture time, then by position within the clip"
+    );
+}
+
+/// A trip mixes formats for real — 4K drone at 23.976 next to a 30 fps phone clip.
+/// One project has one profile, so it goes to whichever format most of the
+/// *timeline* is in.
+#[test]
+fn the_project_profile_follows_the_majority_of_the_marked_footage() {
+    use reel_core::timeline::{choose_profile, Profile};
+    let drone = Profile {
+        width: 3840,
+        height: 2160,
+        fps_num: 24000,
+        fps_den: 1001,
+        sar_num: 1,
+        sar_den: 1,
+    };
+    let phone = Profile {
+        width: 1280,
+        height: 720,
+        fps_num: 30,
+        fps_den: 1,
+        sar_num: 1,
+        sar_den: 1,
+    };
+    let picked = choose_profile(&[phone.clone(), drone.clone(), drone.clone()]);
+    assert_eq!(picked, drone, "two drone marks outvote one phone mark");
+    assert_eq!(picked.describe(), "3840×2160 · 23.98 fps");
+
+    // Portrait drone footage is in this library too; a hardcoded 16:9 would squash it.
+    let portrait = Profile {
+        width: 1080,
+        height: 1920,
+        ..drone.clone()
+    };
+    assert_eq!(portrait.dar(), (9, 16), "display aspect follows the pixels");
+
+    // Nothing probed at all still yields a usable project rather than a panic.
+    assert_eq!(choose_profile(&[]), Profile::default());
+}
+
+/// The regression that makes the whole approach worth it. A bin clip must span the
+/// **whole master**, not the span of its marks — Kdenlive won't let you drag an
+/// edge past the end of the media, so a clip capped at the last mark is a clip
+/// whose edges only move inward. That is precisely the limitation of the cut files
+/// this export exists to avoid, and it renders identically either way, so nothing
+/// but reading the XML catches it.
+#[test]
+fn a_bin_clip_spans_its_whole_master_so_edges_stay_draggable() {
+    use reel_core::timeline::{segment_of, timeline_xml, Profile, Source};
+    let m = PathBuf::from("/lib/party/jaeho/dji/DJI_0004.MP4");
+    let fps = 24000.0 / 1001.0;
+    // a real one: 2228-frame master, mark covering frames 1700..1939
+    let seg = segment_of(&m, "hl", 70.920, 80.920, fps, 2228);
+    let src = Source {
+        master: m.clone(),
+        name: "DJI_0004.MP4".into(),
+        length_f: 2228,
+        has_audio: true,
+        proxy: None,
+    };
+    let xml = timeline_xml(
+        "reel: party",
+        Path::new("/lib/party"),
+        &Profile::default(),
+        None,
+        &[src],
+        &[seg],
+    );
+
+    assert!(
+        xml.contains(r#"<entry producer="bin2" in="0" out="2227"/>"#),
+        "the bin clip must reach the end of the media, not the end of the mark"
+    );
+    assert!(
+        xml.contains(r#"<property name="length">2228</property>"#),
+        "and the producer must declare the master's real length"
+    );
+    // while the timeline segment stays exactly where the mark was
+    assert!(
+        xml.contains(r#"in="1700" out="1939""#),
+        "mark placement unchanged"
+    );
+}
+
+/// Labels are user text and this library really does hold masters with spaces in
+/// their names. An unescaped `&` in a label is a file no XML parser will open —
+/// the timeline would simply fail to load, with the label as the only clue.
+#[test]
+fn labels_and_filenames_survive_the_xml_and_json_layers() {
+    use reel_core::timeline::{segment_of, timeline_xml, Profile, Source};
+    let m = PathBuf::from("/lib/t/jack/26-06-20 14-36-45 4297.mov");
+    let seg = segment_of(&m, r#"Tyler & "Jack" <best>"#, 1.0, 3.0, 30.0, 900);
+    let src = Source {
+        master: m.clone(),
+        name: "26-06-20 14-36-45 4297.mov".into(),
+        length_f: 900,
+        has_audio: true,
+        proxy: None,
+    };
+    let xml = timeline_xml(
+        "reel: t",
+        Path::new("/lib/t"),
+        &Profile::default(),
+        None,
+        &[src],
+        &[seg],
+    );
+
+    // no raw markup escaped into the document
+    assert!(
+        !xml.contains("& \""),
+        "a raw ampersand would break the parse"
+    );
+    assert!(xml.contains("Tyler &amp;"), "ampersand escaped for XML");
+    assert!(xml.contains("&lt;best&gt;"), "angle brackets escaped");
+    // The guide rides inside a JSON string inside an XML text node, so BOTH layers
+    // apply and in that order: JSON turns `"` into `\"`, then XML turns the quote
+    // itself into `&quot;`, leaving `\&quot;`. Unescaping the XML hands a parser
+    // back valid JSON. Kdenlive's own files look exactly like this.
+    assert!(
+        xml.contains(r#"\&quot;Jack\&quot;"#),
+        "quotes escaped for JSON first, then for XML"
+    );
+    assert!(
+        xml.contains(r#"&quot;comment&quot;"#),
+        "the JSON structure itself is XML-escaped, as Kdenlive writes it"
+    );
+    // the space in the path is fine unescaped, but must be present and intact
+    assert!(xml.contains("26-06-20 14-36-45 4297.mov"));
+}
+
+/// A silent master (a still grabbed with `s`, or a clip whose audio track the
+/// camera never wrote) must leave a **gap** on the audio track, not be skipped.
+/// Skipping slides every later audio clip earlier, and the whole track drifts out
+/// of sync with the picture — a failure you'd hear but never see in the XML.
+#[test]
+fn a_silent_source_leaves_a_gap_rather_than_desyncing_the_audio_track() {
+    use reel_core::timeline::{segment_of, timeline_xml, Profile, Source};
+    let quiet = PathBuf::from("/lib/t/p/quiet.MP4");
+    let loud = PathBuf::from("/lib/t/p/loud.MP4");
+    let segs = vec![
+        segment_of(&quiet, "", 0.0, 2.0, 30.0, 900), // 60 frames, no audio
+        segment_of(&loud, "", 0.0, 1.0, 30.0, 900),  // 30 frames, with audio
+    ];
+    let sources = vec![
+        Source {
+            master: quiet,
+            name: "quiet.MP4".into(),
+            length_f: 900,
+            has_audio: false,
+            proxy: None,
+        },
+        Source {
+            master: loud,
+            name: "loud.MP4".into(),
+            length_f: 900,
+            has_audio: true,
+            proxy: None,
+        },
+    ];
+    let xml = timeline_xml(
+        "reel: t",
+        Path::new("/lib/t"),
+        &Profile::default(),
+        None,
+        &sources,
+        &segs,
+    );
+
+    assert!(
+        xml.contains(r#"<blank length="60"/>"#),
+        "the silent clip holds its 60 frames open on the audio track"
+    );
+    assert!(
+        !xml.contains(r#"producer="a2""#),
+        "and no audio producer is emitted for a source that has none"
+    );
+    assert!(
+        xml.contains(r#"producer="a3""#),
+        "while the source that does have audio still gets its clip"
+    );
+}
+
+/// Kdenlive 23.08+ opens a *sequence*: a tractor keyed by UUID, tagged
+/// `producer_type=17`, listed in the bin and pointed at by `activetimeline`. The
+/// older flat layout is perfectly valid MLT — `melt` renders it without a
+/// complaint — but Kdenlive hangs on load rather than opening it. So `melt` is not
+/// an acceptance test for this file, and these are the markers that distinguish
+/// "renders" from "opens".
+#[test]
+fn the_project_is_a_sequence_which_is_what_kdenlive_actually_opens() {
+    use reel_core::timeline::{segment_of, timeline_xml, Profile, Source};
+    let m = PathBuf::from("/lib/t/p/c.MP4");
+    let seg = segment_of(&m, "sunset", 1.0, 3.0, 30.0, 900);
+    let src = Source {
+        master: m.clone(),
+        name: "c.MP4".into(),
+        length_f: 900,
+        has_audio: true,
+        proxy: None,
+    };
+    let xml = timeline_xml(
+        "reel: t",
+        Path::new("/lib/t"),
+        &Profile::default(),
+        None,
+        &[src],
+        &[seg],
+    );
+
+    assert!(xml.contains(r#"<property name="kdenlive:producer_type">17</property>"#));
+    assert!(xml.contains(r#"<property name="kdenlive:docproperties.version">1.1</property>"#));
+    // the sequence uuid has to be the same string in all three places or Kdenlive
+    // opens a project whose active timeline points at nothing
+    let uuid = xml
+        .split(r#"<property name="kdenlive:uuid">"#)
+        .nth(1)
+        .and_then(|s| s.split('<').next())
+        .expect("a sequence uuid")
+        .to_string();
+    assert!(
+        uuid.starts_with('{') && uuid.ends_with('}') && uuid.len() == 38,
+        "got {uuid}"
+    );
+    assert!(
+        xml.contains(&format!(r#"<tractor id="{uuid}""#)),
+        "sequence element"
+    );
+    assert!(
+        xml.contains(&format!(
+            r#"<property name="kdenlive:docproperties.activetimeline">{uuid}</property>"#
+        )),
+        "activetimeline points at the sequence"
+    );
+    assert!(
+        xml.contains(&format!(r#"<entry producer="{uuid}""#)),
+        "sequence is a bin item"
+    );
+    assert!(
+        xml.contains(&format!(r#"<track producer="{uuid}""#)),
+        "project tractor plays it"
+    );
+
+    // Guides belong to the SEQUENCE. `docproperties.guides` is a legacy upgrade
+    // target: writing there loses every guide silently, which is the whole
+    // user-visible point of the export.
+    assert!(
+        xml.contains(
+            r#"kdenlive:sequenceproperties.guides">[{&quot;comment&quot;:&quot;sunset&quot;"#
+        ),
+        "guides ride on the sequence, XML-escaped"
+    );
+    assert!(
+        !xml.contains("docproperties.guides"),
+        "never the legacy location"
+    );
+}
+
+/// UUIDs are derived from a stable seed, not randomised or clock-based, so
+/// rebuilding a trip's timeline is byte-identical. Re-running `edit` shouldn't
+/// rewrite the project into something a diff calls "changed everywhere".
+#[test]
+fn rebuilding_the_same_timeline_produces_the_same_file() {
+    use reel_core::timeline::{segment_of, timeline_xml, Profile, Source};
+    let m = PathBuf::from("/lib/t/p/c.MP4");
+    let seg = segment_of(&m, "hl", 1.0, 3.0, 30.0, 900);
+    let src = Source {
+        master: m.clone(),
+        name: "c.MP4".into(),
+        length_f: 900,
+        has_audio: true,
+        proxy: None,
+    };
+    let once = timeline_xml(
+        "reel: t",
+        Path::new("/lib/t"),
+        &Profile::default(),
+        None,
+        std::slice::from_ref(&src),
+        std::slice::from_ref(&seg),
+    );
+    let twice = timeline_xml(
+        "reel: t",
+        Path::new("/lib/t"),
+        &Profile::default(),
+        None,
+        &[src],
+        &[seg],
+    );
+    assert_eq!(once, twice);
+    // and a different trip is genuinely a different project
+    let other = timeline_xml(
+        "reel: other",
+        Path::new("/lib/o"),
+        &Profile::default(),
+        None,
+        &[],
+        &[],
+    );
+    assert_ne!(once, other);
+}
+
+/// `kdenlive:docproperties.profile` wants a profile *identifier* (`atsc_1080p_2398`),
+/// not a human description — and there is no stock profile for most of what these
+/// cameras shoot (3840x2160 or 1080x1920 at 24000/1001). An unresolvable name makes
+/// Kdenlive block on a "choose a profile" modal at load: offscreen that looks like a
+/// hang, in the GUI it's a dialog standing between you and your project.
+///
+/// The reason this is a test and not a comment: the failure is *conditional*. A
+/// bogus name is harmless at 30/1, because Kdenlive quietly matches a stock profile,
+/// and fatal at 24000/1001. Every synthetic 30 fps fixture passed while every real
+/// trip in this library — all DJI, all 24000/1001 — would have hung.
+#[test]
+fn the_project_never_claims_a_profile_name_kdenlive_cannot_resolve() {
+    use reel_core::timeline::{segment_of, timeline_xml, Profile, Source};
+    let m = PathBuf::from("/lib/party/jaeho/dji/DJI_0004.MP4");
+    let drone = Profile {
+        width: 3840,
+        height: 2160,
+        fps_num: 24000,
+        fps_den: 1001,
+        sar_num: 1,
+        sar_den: 1,
+    };
+    let seg = segment_of(&m, "hl", 1.0, 3.0, drone.fps(), 5000);
+    let src = Source {
+        master: m,
+        name: "DJI_0004.MP4".into(),
+        length_f: 5000,
+        has_audio: true,
+        proxy: None,
+    };
+    let xml = timeline_xml(
+        "reel: party",
+        Path::new("/lib/party"),
+        &drone,
+        None,
+        &[src],
+        &[seg],
+    );
+
+    assert!(
+        !xml.contains("docproperties.profile"),
+        "never write a profile identifier that may not resolve"
+    );
+    // The <profile> element is what actually states the format, and must carry the
+    // real fractional rate rather than a rounded one.
+    assert!(
+        xml.contains(r#"frame_rate_num="24000" frame_rate_den="1001""#),
+        "the real rate, unrounded"
+    );
+    assert!(xml.contains(r#"width="3840" height="2160""#));
+}
+
+/// `kdenlive:docproperties.profile` must name a profile Kdenlive can resolve, so
+/// the name is looked up in MLT's profile set rather than invented. The matching
+/// rule is exact — a profile that agrees on size but not frame rate would conform
+/// the footage and change its duration, which is not a near-miss worth taking.
+#[test]
+fn the_profile_id_is_an_exact_match_or_nothing() {
+    use reel_core::timeline::{match_profile, Profile};
+    let drone = Profile {
+        width: 3840,
+        height: 2160,
+        fps_num: 24000,
+        fps_den: 1001,
+        sar_num: 1,
+        sar_den: 1,
+    };
+    let candidates = vec![
+        ("uhd_2160p_2398".to_string(), drone.clone()),
+        (
+            "uhd_2160p_30".to_string(),
+            Profile {
+                fps_num: 30,
+                fps_den: 1,
+                ..drone.clone()
+            },
+        ),
+        (
+            "atsc_1080p_2398".to_string(),
+            Profile {
+                width: 1920,
+                height: 1080,
+                ..drone.clone()
+            },
+        ),
+    ];
+    assert_eq!(
+        match_profile(&candidates, &drone).as_deref(),
+        Some("uhd_2160p_2398")
+    );
+
+    // Portrait drone footage at 23.98 matches no stock profile. `None` is the right
+    // answer: the caller then tells the user to set it, rather than emitting a name
+    // that hangs Kdenlive on a modal or letting it default to PAL in silence.
+    let portrait = Profile {
+        width: 1080,
+        height: 1920,
+        ..drone.clone()
+    };
+    assert_eq!(match_profile(&candidates, &portrait), None);
+
+    // Same size, different rate is NOT a match.
+    let same_size_other_rate = Profile {
+        fps_num: 25,
+        fps_den: 1,
+        ..drone
+    };
+    assert_eq!(match_profile(&candidates, &same_size_other_rate), None);
+}
+
+/// Kdenlive **segfaults** on load if `kdenlive:proxy` names a file that isn't
+/// there — measured, reproducibly, and it happens whether `resource` points at the
+/// proxy or the master. Proxies are a cache (`<trip>/.proxies/`, swept by archive,
+/// deletable by hand), so the only safe rule is: never write the property unless
+/// the file was present when the project was built. `build_timeline` sets
+/// `Source.proxy` from an `is_file()` check; this pins the emitter to it.
+#[test]
+fn a_proxy_is_only_referenced_when_it_actually_exists() {
+    use reel_core::timeline::{segment_of, timeline_xml, Profile, Source};
+    let m = PathBuf::from("/lib/t/jaeho/dji/clip.MP4");
+    let seg = segment_of(&m, "hl", 1.0, 3.0, 30.0, 900);
+    let bare = Source {
+        master: m.clone(),
+        name: "clip.MP4".into(),
+        length_f: 900,
+        has_audio: true,
+        proxy: None,
+    };
+    let xml = timeline_xml(
+        "reel: t",
+        Path::new("/lib/t"),
+        &Profile::default(),
+        None,
+        std::slice::from_ref(&bare),
+        std::slice::from_ref(&seg),
+    );
+    assert!(
+        !xml.contains("kdenlive:proxy"),
+        "no proxy property without a proxy"
+    );
+    assert!(
+        !xml.contains("kdenlive:originalurl"),
+        "and no originalurl either"
+    );
+    assert!(
+        xml.contains(r#"name="resource">/lib/t/jaeho/dji/clip.MP4"#),
+        "resource is the master"
+    );
+    assert!(
+        xml.contains(r#"kdenlive:docproperties.enableproxy">0"#),
+        "proxies off when there are none"
+    );
+
+    // With one: resource swaps to the proxy, the master rides in originalurl so
+    // Kdenlive renders full quality from it, and proxying is switched on.
+    let proxied = Source {
+        proxy: Some(PathBuf::from("/lib/t/.proxies/jaeho__dji__clip.mp4")),
+        ..bare
+    };
+    let xml = timeline_xml(
+        "reel: t",
+        Path::new("/lib/t"),
+        &Profile::default(),
+        None,
+        &[proxied],
+        &[seg],
+    );
+    assert!(xml.contains(r#"name="resource">/lib/t/.proxies/jaeho__dji__clip.mp4"#));
+    assert!(xml.contains(r#"kdenlive:originalurl">/lib/t/jaeho/dji/clip.MP4"#));
+    assert!(xml.contains(r#"kdenlive:docproperties.enableproxy">1"#));
+}
+
+/// Kdenlive refuses a fractional frame rate on non-standard geometry — portrait
+/// drone footage at 1080x1920 @ 23.98 — with a modal on *every* open, and no custom
+/// profile avoids it (tested in Kdenlive's own file format, in its own profile
+/// directory, under several names). So when nothing standard matches, the rate is
+/// rounded to the nearest whole number and every frame position is computed against
+/// that, keeping clips in step with each other.
+///
+/// Footage that *does* match a stock profile must be left exactly alone — 4K
+/// landscape at 23.98 is `uhd_2160p_2398` and conforming it would be a pointless
+/// loss of precision.
+#[test]
+fn only_footage_kdenlive_cannot_open_gets_its_rate_conformed() {
+    use reel_core::timeline::{conform, Profile};
+
+    // Portrait at 23.98: no stock profile, fractional rate → rounded to 24.
+    let portrait = Profile {
+        width: 1080,
+        height: 1920,
+        fps_num: 24000,
+        fps_den: 1001,
+        sar_num: 1,
+        sar_den: 1,
+    };
+    let (got, id, conformed) = conform(&portrait);
+    assert!(
+        conformed,
+        "portrait 23.98 has to be conformed or it won't open"
+    );
+    assert_eq!(
+        (got.fps_num, got.fps_den),
+        (24, 1),
+        "nearest whole rate, not 25 or 30"
+    );
+    assert_eq!(
+        (got.width, got.height),
+        (1080, 1920),
+        "geometry is never touched"
+    );
+    assert!(
+        id.is_none(),
+        "still no stock profile — but an integer rate opens clean"
+    );
+
+    // 4K landscape at 23.98 IS stock. Leave it exactly as shot.
+    let uhd = Profile {
+        width: 3840,
+        height: 2160,
+        ..portrait.clone()
+    };
+    let (got, id, conformed) = conform(&uhd);
+    assert!(
+        !conformed,
+        "never conform footage Kdenlive already understands"
+    );
+    assert_eq!(
+        (got.fps_num, got.fps_den),
+        (24000, 1001),
+        "left frame-exact"
+    );
+    assert_eq!(id.as_deref(), Some("uhd_2160p_2398"));
+
+    // An integer rate on odd geometry is already fine — Kdenlive invents a profile.
+    let odd = Profile {
+        width: 640,
+        height: 480,
+        fps_num: 30,
+        fps_den: 1,
+        sar_num: 1,
+        sar_den: 1,
+    };
+    let (got, _, conformed) = conform(&odd);
+    assert!(!conformed);
+    assert_eq!(got.fps(), 30.0);
+}

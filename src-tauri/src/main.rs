@@ -161,6 +161,7 @@ fn main() {
             commands::make_proxy,
             commands::make_card_proxy,
             commands::cut_trip,
+            commands::grab_still,
             commands::open_in_editor,
             commands::clip_health,
             commands::move_clips,

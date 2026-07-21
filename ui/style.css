@@ -465,6 +465,62 @@ main {
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: 20px;
 }
+
+/* ---- archived shelf: done trips, off the dashboard but never hidden ---- */
+.archived {
+  margin-top: 34px;
+  border-top: 1px solid var(--line-soft);
+}
+.archived-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 16px 2px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.archived-head::-webkit-details-marker {
+  display: none;
+}
+.archived-head:hover .archived-title {
+  color: var(--text);
+}
+.archived-caret {
+  align-self: center;
+  font-size: 10px;
+  color: var(--faint);
+  transition: transform 0.18s var(--ease);
+}
+.archived[open] .archived-caret {
+  transform: rotate(90deg);
+}
+.archived-title {
+  font-family: var(--serif);
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.archived-sub {
+  color: var(--faint);
+  font-size: 13px;
+}
+.archived .trip-grid {
+  padding-bottom: 8px;
+}
+/* An archived card is a record, not a workspace: quieter, and its cover reads as
+   a memory of the footage rather than something to click into. */
+.trip.is-archived {
+  box-shadow: none;
+}
+.trip.is-archived .cover-wrap {
+  opacity: 0.62;
+}
+@media (prefers-reduced-motion: reduce) {
+  .archived-caret {
+    transition: none;
+  }
+}
 .trip {
   background: color-mix(in oklab, var(--surface) 92%, var(--tc));
   border: 1px solid var(--line);
@@ -800,6 +856,10 @@ main {
 /* ---- import dialog ---- */
 .dialog {
   width: min(460px, calc(100vw - 32px));
+  /* The `* { margin: 0 }` reset above also hits `dialog:modal`, whose UA rule is
+     `margin: auto` — that's the only thing centering a modal, so every dialog sat
+     in the top-left corner. Put it back explicitly. */
+  margin: auto;
   padding: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -810,6 +870,50 @@ main {
 .dialog::backdrop {
   background: rgb(0 0 0 / 0.5);
   backdrop-filter: blur(2px);
+}
+/* The keys panel is a reference, not a form — wider, and three columns when
+   there's room so the whole vocabulary is visible without scrolling. */
+.dialog.keys {
+  width: min(760px, calc(100vw - 32px));
+}
+.keys-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 8px 28px;
+  padding: 0 20px 4px;
+  /* a short window scrolls the reference rather than pushing Close off-screen */
+  max-height: calc(100vh - 210px);
+  overflow-y: auto;
+}
+.keys-head {
+  font-family: var(--serif);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--faint);
+  text-transform: lowercase;
+  letter-spacing: 0.03em;
+  margin: 12px 0 8px;
+}
+.keys-row {
+  display: flex;
+  gap: 9px;
+  align-items: baseline;
+  padding: 3.5px 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.keys-k {
+  flex: none;
+  display: flex;
+  gap: 2px;
+  min-width: 62px;
+}
+.keys-d {
+  color: var(--muted);
+}
+.keys-d b {
+  color: var(--text);
+  font-weight: 600;
 }
 .dialog[open] {
   animation: dialog-in 0.18s var(--ease);
@@ -1094,10 +1198,6 @@ body.reviewing {
   align-items: center;
   gap: 10px;
 }
-.player-mark-count {
-  color: var(--faint);
-  font-size: 12.5px;
-}
 /* proxy/master source tag — amber on a master (may not scrub), neutral on a proxy */
 .src-tag {
   font: inherit;
@@ -1122,9 +1222,7 @@ body.reviewing {
 }
 /* Card preview is read-only — hide the mark/move/delete/marks controls. The
    source (proxy/master) tag and transport stay; card footage isn't a trip. */
-#player.preview #player-mark-count,
-#player.preview #player-move,
-#player.preview #player-trash,
+#player.preview #player-menu,
 #player.preview #player-list,
 #player.preview .edit-hint {
   display: none;
@@ -1180,11 +1278,9 @@ body.reviewing {
 }
 /* A photo has no timeline: hide the transport (play/scrub/time), the key hints,
    and the mark controls — leaving the stage and the filmstrip to step through.
-   Move/delete stay in the header — a photo is a capture you can relocate or
-   discard like any other. */
+   The ⋯ stays: a photo is a capture you can relocate or discard like any other. */
 #player.photo .transport,
 #player.photo .keyhints,
-#player.photo #player-mark-count,
 #player.photo #player-list {
   display: none;
 }
@@ -1204,6 +1300,85 @@ body.reviewing {
   font-size: 14px;
   max-width: 56ch;
   line-height: 1.5;
+}
+/* Shuttle speed (J/K/L). Sits over the picture rather than in the chrome, so the
+   speed reads where the eye already is. Only present off normal playback, so its
+   absence means 1× forward — nothing to dismiss, nothing to parse. */
+.shuttle-tag {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  color: var(--text);
+  background: color-mix(in oklab, var(--bg) 72%, transparent);
+  border: 1px solid var(--line-soft);
+  backdrop-filter: blur(6px);
+  opacity: 0;
+  transition: opacity 0.12s var(--ease);
+}
+.shuttle-tag.on {
+  opacity: 1;
+}
+.shuttle-tag .sh-dir {
+  color: var(--faint);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+}
+/* Segment play / loop, opposite corner from the speed so the two never collide.
+   Carries the trip's colour — it's a mark you're watching, not a transport state. */
+.zone-tag {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  background: color-mix(in oklab, var(--bg) 72%, transparent);
+  border: 1px solid color-mix(in oklab, var(--tc) 45%, transparent);
+  backdrop-filter: blur(6px);
+  opacity: 0;
+  transition: opacity 0.12s var(--ease);
+}
+.zone-tag.on {
+  opacity: 1;
+}
+.zone-tag .zn-ico {
+  color: var(--tc);
+  font-size: 13px;
+}
+.zone-tag .zn-name {
+  color: var(--tc);
+  font-weight: 600;
+}
+.zone-tag .zn-hint {
+  padding-left: 8px;
+  border-left: 1px solid var(--line-soft);
+  color: var(--faint);
+  font-weight: 500;
+  font-size: 11.5px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .zone-tag {
+    transition: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .shuttle-tag {
+    transition: none;
+  }
 }
 .stage-over.err .stage-msg {
   color: var(--warn);
@@ -1271,7 +1446,9 @@ body.reviewing {
   font-size: 12.5px;
   line-height: 1.65;
 }
-.marks-empty kbd {
+/* an inline key in prose — the marks panel's empty note and the keys panel */
+.marks-empty kbd,
+.keys-row kbd {
   font-family: var(--mono);
   font-size: 11px;
   color: var(--text);
@@ -2348,4 +2525,21 @@ body.org-dragging .org-lane {
   .dialog[open] {
     animation: none;
   }
+}
+/* the one line of prose in the keys panel — what "trimming" means before the keys */
+.keys-note {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--faint);
+  margin: -2px 0 8px;
+}
+.keys-note em {
+  color: var(--muted);
+  font-style: normal;
+}
+/* keys set in prose need their own gap — the `.keys-k` column gets one from flex,
+   but inline caps butt together and read as one long key ("ctrlshiftspace"). */
+.keys-note kbd + kbd,
+.keys-d kbd + kbd {
+  margin-left: 3px;
 }

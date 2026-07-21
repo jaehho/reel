@@ -43,7 +43,10 @@ fn slugify(label: &str) -> String {
 /// current, but marks written before a trip was renamed carry the old absolute
 /// path; fall back to a master under `dir` with the same basename (unique per
 /// camera), so a moved trip still cuts. Ambiguous → give up rather than guess.
-fn locate(master: &Path, dir: &Path) -> Option<PathBuf> {
+///
+/// Shared with `timeline`, so a moved trip builds a Kdenlive project exactly as
+/// well as it cuts — one recovery rule, not two that can drift apart.
+pub(crate) fn locate(master: &Path, dir: &Path) -> Option<PathBuf> {
     if master.is_file() {
         return Some(master.to_path_buf());
     }

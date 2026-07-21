@@ -1,6 +1,7 @@
 //! Local trips: discovery, `.reel` metadata, and pipeline-state detection.
 
 use crate::config::Config;
+use crate::ledger::Ledger;
 use crate::media::{captured_at, fileid_of, masters_in};
 use crate::model::{ClipRef, Share, Trip, TripState};
 use std::collections::HashMap;
@@ -141,8 +142,26 @@ fn dir_bytes(dir: &Path) -> u64 {
         .sum()
 }
 
-fn derive_state(masters: usize, marks: usize, clips: usize) -> TripState {
+/// Was this trip deliberately archived? Written by `commit_archive` rather than
+/// guessed, so "I freed this" is distinguishable from "the footage went missing".
+fn archived_flag(dir: &Path) -> bool {
+    matches!(
+        trip_meta(dir, "archived").as_deref(),
+        Some("1" | "yes" | "true")
+    )
+}
+
+fn derive_state(archived: bool, masters: usize, marks: usize, clips: usize) -> TripState {
+    // The marker wins, but only while the raw is actually gone: bringing footage
+    // back clears it (see `restore`), and a stale marker on a trip that has masters
+    // again would otherwise keep it filed away with no way to reach it.
+    if archived && masters == 0 {
+        return TripState::Archived;
+    }
     match (masters, marks, clips) {
+        // Trips archived before the marker existed. The old inference, kept as a
+        // fallback so an existing library doesn't read as Empty overnight — but it
+        // can't see an archive that was never cut, which is why the flag exists.
         (0, _, c) if c > 0 => TripState::Archived,
         (0, _, _) => TripState::Empty,
         (_, _, c) if c > 0 => TripState::Cut,
@@ -151,7 +170,35 @@ fn derive_state(masters: usize, marks: usize, clips: usize) -> TripState {
     }
 }
 
-fn build_trip(cfg: &Config, dir: &Path) -> Trip {
+/// The cover and date range for a trip whose raw is gone. Both normally come from
+/// the masters on disk, so an archived trip degraded to a blank, undated tile the
+/// moment you freed the disk — as if the footage had never existed.
+///
+/// It hasn't: the ledger remembers every capture (content id and when), and the
+/// poster cache is keyed by that same id and lives *outside* the trip, so it
+/// survives the delete. The card keeps its face without a single byte coming back
+/// down. Best-effort — a cleared cache just falls back to today's blank tile.
+fn archived_face(ledger: &Ledger, name: &str) -> (Option<ClipRef>, Option<i64>, Option<i64>) {
+    let mut rows: Vec<(i64, &str)> = ledger
+        .rows
+        .iter()
+        .filter(|r| r.trip == name)
+        .map(|r| (r.captured.parse::<i64>().unwrap_or(0), r.id.as_str()))
+        .collect();
+    rows.sort();
+    // No path: the file is genuinely gone. The id alone resolves the poster, since
+    // `ensure_poster` returns a cache hit before it ever looks at the clip — and on
+    // a miss it fails cleanly to the placeholder, which is the old behaviour anyway.
+    let cover = rows.first().map(|(_, id)| ClipRef {
+        path: String::new(),
+        fileid: id.to_string(),
+    });
+    let start = rows.first().map(|&(t, _)| t).filter(|&t| t > 0);
+    let end = rows.last().map(|&(t, _)| t).filter(|&t| t > 0);
+    (cover, start, end)
+}
+
+fn build_trip(cfg: &Config, dir: &Path, ledger: &Ledger) -> Trip {
     let me = cfg.user.as_str();
     let name = dir
         .file_name()
@@ -162,7 +209,7 @@ fn build_trip(cfg: &Config, dir: &Path) -> Trip {
     let masters = masters_v.len();
     let marks = count_marks(&dir.join("marks.tsv"));
     let clips = count_clips(&dir.join("clips"));
-    let state = derive_state(masters, marks, clips);
+    let state = derive_state(archived_flag(dir), masters, marks, clips);
     // Provenance: yours (under `<trip>/<you>/`) vs. footage pulled from others.
     let mut mine = 0usize;
     let mut contributors: Vec<String> = Vec::new();
@@ -198,6 +245,13 @@ fn build_trip(cfg: &Config, dir: &Path) -> Trip {
     // the first and last clips' timestamps bound the trip.
     let start = masters_v.first().map(|p| captured_at(p)).filter(|&t| t > 0);
     let end = masters_v.last().map(|p| captured_at(p)).filter(|&t| t > 0);
+    // An archived trip has no masters to read any of that from — fall back to what
+    // the ledger and the poster cache still remember about it.
+    let (cover, start, end) = if state == TripState::Archived && cover.is_none() {
+        archived_face(ledger, &name)
+    } else {
+        (cover, start, end)
+    };
     let sync = crate::sync::brief(cfg, &name, &masters_v, dir);
     let shared_with = crate::share::cached_shares(cfg, &name);
     Trip {
@@ -224,5 +278,11 @@ fn build_trip(cfg: &Config, dir: &Path) -> Trip {
 }
 
 pub fn list_trips(cfg: &Config) -> Vec<Trip> {
-    trip_dirs(cfg).iter().map(|d| build_trip(cfg, d)).collect()
+    // Loaded once for the whole dashboard, not per trip: it's only read for
+    // archived trips, but it's one file and the alternative is re-parsing it n times.
+    let ledger = Ledger::load(&cfg.ledger_path());
+    trip_dirs(cfg)
+        .iter()
+        .map(|d| build_trip(cfg, d, &ledger))
+        .collect()
 }

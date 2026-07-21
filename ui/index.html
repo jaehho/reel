@@ -37,6 +37,18 @@
           <span class="share-all-slot" id="share-all-slot"></span>
         </div>
         <div id="trips" class="trip-grid"></div>
+
+        <!-- Archived trips: raw freed, footage in the cloud, nothing here to act
+             on. Filed off the dashboard but one click away, and never hidden
+             without saying how many are in there. -->
+        <details id="archived-panel" class="archived" hidden>
+          <summary class="archived-head">
+            <span class="archived-caret" aria-hidden="true">▸</span>
+            <span class="archived-title">Archived</span>
+            <span class="archived-sub" id="archived-sub"></span>
+          </summary>
+          <div id="archived-trips" class="trip-grid"></div>
+        </details>
       </section>
     </main>
 
@@ -305,7 +317,7 @@
         <span class="kh"><kbd>ctrl</kbd><kbd>a</kbd>all</span>
         <span class="kh-sep"></span>
         <span class="kh"><kbd>m</kbd>move to…</span>
-        <span class="kh"><kbd>⌫</kbd>delete</span>
+        <span class="kh"><kbd>del</kbd>delete</span>
         <span class="kh"><kbd>esc</kbd>done</span>
       </div>
     </section>
@@ -323,12 +335,12 @@
         <div class="player-tools">
           <span class="who-badge" id="player-who" hidden></span>
           <button class="src-tag" id="player-proxy" type="button" hidden></button>
-          <span class="player-mark-count tnum" id="player-mark-count"></span>
-          <button class="btn ghost small" id="player-move" type="button" title="Move this clip to another trip (m)">Move</button>
-          <button class="iconbtn ghost trash" id="player-trash" type="button" aria-label="Delete this clip permanently" title="Delete this clip permanently">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/></svg>
-          </button>
+          <!-- Mark count lives on the button that opens them, rather than as a
+               separate readout of the same number. -->
           <button class="btn ghost small" id="player-list" type="button">Marks</button>
+          <button class="trip-menu player-menu" id="player-menu" type="button"
+                  aria-label="More actions for this clip"
+                  title="Move · delete">⋯</button>
         </div>
       </header>
 
@@ -337,6 +349,8 @@
           <video id="video" playsinline preload="auto"></video>
           <img id="photo" class="stage-photo" alt="" hidden />
           <div class="stage-over" id="stage-over" hidden></div>
+          <div class="shuttle-tag" id="shuttle-tag" hidden aria-hidden="true"></div>
+          <div class="zone-tag" id="zone-tag" hidden aria-hidden="true"></div>
         </div>
         <aside class="marks-panel" id="marks-panel" hidden>
           <div class="marks-head">
@@ -345,8 +359,9 @@
           </div>
           <div class="marks-list" id="marks-list"></div>
           <p class="marks-empty" id="marks-empty">
-            No marks yet. Press <kbd>i</kbd> to set an in-point, <kbd>o</kbd> to
-            close the segment, or <kbd>h</kbd> to grab a highlight.
+            No marks yet. Press <kbd>h</kbd> to highlight the moment you just saw,
+            or <kbd>i</kbd> and <kbd>o</kbd> to pick both edges yourself. Cut turns
+            every mark into its own file.
           </p>
         </aside>
       </div>
@@ -364,29 +379,86 @@
             </div>
           </div>
         </div>
+        <!-- The working set only. Everything else — undo, jumping between marks,
+             clip ends, play zone, move, delete — is a keypress away behind `?`,
+             which also explains what a mark actually is. -->
         <div class="keyhints" id="keyhints" aria-hidden="true">
-          <span class="kh edit-hint"><kbd>i</kbd>in</span>
-          <span class="kh edit-hint" id="hint-out"><kbd>o</kbd>out</span>
           <span class="kh edit-hint"><kbd>h</kbd>highlight</span>
-          <span class="kh edit-hint"><kbd>e</kbd>label</span>
-          <span class="kh edit-hint"><kbd>u</kbd>undo</span>
-          <span class="kh edit-hint"><kbd>⌫</kbd>delete mark</span>
-          <span class="kh edit-hint"><kbd>m</kbd>move clip</span>
-          <span class="kh edit-hint"><kbd>shift</kbd><kbd>⌫</kbd>delete clip</span>
+          <span class="kh edit-hint"><kbd>i</kbd>start</span>
+          <span class="kh edit-hint" id="hint-out"><kbd>o</kbd>end</span>
+          <span class="kh edit-hint"><kbd>e</kbd>name</span>
+          <span class="kh edit-hint"><kbd>s</kbd>still</span>
           <span class="kh-sep edit-hint"></span>
           <span class="kh"><kbd>space</kbd>play</span>
           <span class="kh"><kbd>j</kbd><kbd>k</kbd><kbd>l</kbd>shuttle</span>
-          <span class="kh"><kbd>home</kbd><kbd>end</kbd>clip ends</span>
-          <span class="kh"><kbd>Ctrl</kbd><kbd>space</kbd>play zone</span>
-          <span class="kh-sep"></span>
           <span class="kh"><kbd>←</kbd><kbd>→</kbd>seek</span>
           <span class="kh"><kbd>[</kbd><kbd>]</kbd>clip</span>
-          <span class="kh edit-hint"><kbd>Ctrl</kbd><kbd>←</kbd><kbd>→</kbd>mark</span>
-          <span class="kh edit-hint"><kbd>x</kbd>marks</span>
+          <span class="kh-sep"></span>
+          <span class="kh"><kbd>?</kbd>keys</span>
         </div>
         <div class="filmstrip" id="filmstrip"></div>
       </footer>
     </section>
+
+    <!-- Every key, plus the one sentence that makes the vocabulary make sense.
+         `in`/`out` and `highlight` produced the same thing — a mark — while
+         sounding like different concepts; this says so outright. -->
+    <dialog id="keys-dialog" class="dialog keys" aria-labelledby="keys-title">
+      <form method="dialog" class="import-form">
+        <div class="dialog-head">
+          <h2 class="dialog-title" id="keys-title">Keys</h2>
+          <p class="dialog-meta">
+            A <strong>mark</strong> is a piece of a clip worth keeping. Cut turns
+            every mark into its own file, named after you.
+          </p>
+        </div>
+
+        <div class="keys-grid">
+          <section class="keys-group">
+            <h3 class="keys-head">Marking</h3>
+            <div class="keys-row"><span class="keys-k"><kbd>h</kbd></span><span class="keys-d"><b>highlight</b> — mark the moment you just saw, in one press</span></div>
+            <div class="keys-row"><span class="keys-k"><kbd>i</kbd></span><span class="keys-d"><b>start</b> — begin a mark here instead, to pick both edges</span></div>
+            <div class="keys-row"><span class="keys-k"><kbd>o</kbd></span><span class="keys-d"><b>end</b> — close it at the playhead</span></div>
+            <div class="keys-row"><span class="keys-k"><kbd>e</kbd></span><span class="keys-d"><b>name</b> the last mark — the name lands in the cut filename</span></div>
+            <div class="keys-row"><span class="keys-k"><kbd>u</kbd></span><span class="keys-d">undo the last mark</span></div>
+            <div class="keys-row"><span class="keys-k"><kbd>x</kbd></span><span class="keys-d">delete the selected mark — <kbd>del</kbd> and <kbd>backspace</kbd> do the same</span></div>
+            <div class="keys-row"><span class="keys-k"><kbd>m</kbd></span><span class="keys-d">show every mark on this trip</span></div>
+          </section>
+
+          <section class="keys-group">
+            <h3 class="keys-head">Watching</h3>
+            <div class="keys-row"><span class="keys-k"><kbd>space</kbd></span><span class="keys-d">play / pause</span></div>
+            <div class="keys-row"><span class="keys-k"><kbd>j</kbd><kbd>k</kbd><kbd>l</kbd></span><span class="keys-d">shuttle back / stop / forward — press again to go faster</span></div>
+            <div class="keys-row"><span class="keys-k"><kbd>←</kbd><kbd>→</kbd></span><span class="keys-d">seek 5s, with <kbd>shift</kbd> 1s</span></div>
+            <div class="keys-row"><span class="keys-k"><kbd>home</kbd><kbd>end</kbd></span><span class="keys-d">jump to the start or end of this clip</span></div>
+            <div class="keys-row"><span class="keys-k"><kbd>ctrl</kbd><kbd>space</kbd></span><span class="keys-d">play just the marked segment, with <kbd>shift</kbd> on a loop</span></div>
+            <div class="keys-row"><span class="keys-k"><kbd>ctrl</kbd><kbd>←</kbd><kbd>→</kbd></span><span class="keys-d">jump between marks</span></div>
+          </section>
+
+          <section class="keys-group">
+            <h3 class="keys-head">Trimming a mark</h3>
+            <p class="keys-note">With a segment up (<kbd>ctrl</kbd><kbd>shift</kbd><kbd>space</kbd>), these walk its edges and park you <em>paused on that edge</em>, so you see the exact frame it lands on.</p>
+            <div class="keys-row"><span class="keys-k"><kbd>shift</kbd><kbd>←</kbd><kbd>→</kbd></span><span class="keys-d">move the <b>start</b> earlier / later</span></div>
+            <div class="keys-row"><span class="keys-k"><kbd>ctrl</kbd><kbd>←</kbd><kbd>→</kbd></span><span class="keys-d">move the <b>end</b> earlier / later</span></div>
+            <div class="keys-row"><span class="keys-k"><kbd>ctrl</kbd><kbd>shift</kbd><kbd>space</kbd></span><span class="keys-d">pick the loop back up on the new range</span></div>
+            <div class="keys-row"><span class="keys-k"><kbd>i</kbd><kbd>o</kbd></span><span class="keys-d">or jump that edge straight to the playhead</span></div>
+          </section>
+
+          <section class="keys-group">
+            <h3 class="keys-head">This clip</h3>
+            <div class="keys-row"><span class="keys-k"><kbd>[</kbd><kbd>]</kbd></span><span class="keys-d">previous / next clip in the trip</span></div>
+            <div class="keys-row"><span class="keys-k"><kbd>s</kbd></span><span class="keys-d"><b>still</b> — keep this frame as a photo, beside the clip it came from</span></div>
+            <div class="keys-row"><span class="keys-k"><kbd>shift</kbd><kbd>m</kbd></span><span class="keys-d">move this clip to another trip</span></div>
+            <div class="keys-row"><span class="keys-k"><kbd>shift</kbd><kbd>del</kbd></span><span class="keys-d">delete this clip for good</span></div>
+            <div class="keys-row"><span class="keys-k"><kbd>esc</kbd></span><span class="keys-d">back to your trips</span></div>
+          </section>
+        </div>
+
+        <div class="dialog-foot">
+          <button class="btn ghost" type="button" id="keys-close">Close</button>
+        </div>
+      </form>
+    </dialog>
 
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
     <script src="app.js" defer></script>

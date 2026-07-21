@@ -123,6 +123,13 @@ pub fn restore(
             bytes += m.len();
         }
     }
+    // Footage is back, so the trip isn't archived any more — clear the marker and
+    // it returns to the dashboard. Done on any file landing, not just a full
+    // restore: a partly-restored trip has raw you can act on, so leaving it filed
+    // away would strand exactly the footage you just asked for.
+    if files > 0 {
+        let _ = crate::trips::set_trip_meta(&dir, "archived", "0");
+    }
     Ok(RestoreResult {
         trip: trip.to_string(),
         files,

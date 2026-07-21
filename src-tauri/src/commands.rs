@@ -3,10 +3,10 @@
 
 use reel_core::{
     ArchivePlan, ArchiveProgress, ArchiveResult, CardInfo, Config, Contributor, CutProgress,
-    CutResult, DeleteResult, DupProgress, DupReport, DupResolution, DupResolveResult,
+    CutResult, DeleteResult, DupProgress, DupReport, DupResolution, DupResolveResult, EditResult,
     ImportProgress, ImportResult, Mark, MoveResult, Playlist, PullProgress, PullResult,
-    PushProgress, PushResult, ReclaimPlan, ReclaimResult, Sharee, SyncActions, SyncProgress,
-    SyncResult, Trip, TripShare, TripSync, WipeProgress,
+    PushProgress, PushResult, ReclaimPlan, ReclaimResult, Sharee, StillResult, SyncActions,
+    SyncProgress, SyncResult, Trip, TripShare, TripSync, WipeProgress,
 };
 use std::path::Path;
 use tauri::ipc::Channel;
@@ -297,13 +297,32 @@ pub async fn cut_trip(channel: Channel<CutProgress>, trip: String) -> Result<Cut
     }
 }
 
-/// Hand a trip's finished cut to the editor (Kdenlive), launched detached so the
-/// GUI never owns the editor's lifetime. Falls back to the masters for a trip
-/// that hasn't been cut yet. Runs off the UI thread; resolves with the number of
-/// files opened, or an error string (bad/empty trip, or the editor isn't
-/// installed).
+/// Grab the frame at `t` seconds from `master` and keep it as a photo capture
+/// beside it — a picture the user picked, not a derived thumbnail, so it joins the
+/// trip like any other capture. Off the UI thread: this decodes from the master,
+/// which can be a multi-GB read. Idempotent per frame; `Err` names why ffmpeg
+/// couldn't, since this was asked for by hand.
 #[tauri::command]
-pub async fn open_in_editor(trip: String) -> Result<usize, String> {
+pub async fn grab_still(master: String, t: f64) -> Result<StillResult, String> {
+    let cfg = Config::from_env();
+    match tauri::async_runtime::spawn_blocking(move || {
+        reel_core::grab_still(&cfg, Path::new(&master), t)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(join) => Err(format!("still task failed: {join}")),
+    }
+}
+
+/// Hand a trip to the editor (Kdenlive), launched detached so the GUI never owns
+/// the editor's lifetime. Builds a `.kdenlive` timeline from the trip's marks when
+/// it can — every mark end to end, against the master, so edges stay draggable —
+/// and falls back to opening loose files (the cut, else the masters) when there's
+/// no timeline to build. Runs off the UI thread; resolves with what was handed
+/// over, or an error string (bad/empty trip, or the editor isn't installed).
+#[tauri::command]
+pub async fn open_in_editor(trip: String) -> Result<EditResult, String> {
     let cfg = Config::from_env();
     match tauri::async_runtime::spawn_blocking(move || reel_core::open_in_editor(&cfg, &trip)).await
     {

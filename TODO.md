@@ -767,3 +767,461 @@ Same shape, but its caller does `else { continue }`, so returning `None` for a
 stray would make that clip **undeletable** — a worse failure than a wrong label.
 Correct fix is to handle a stray explicitly (delete locally, no cloud path)
 rather than to tighten the reader. Left alone until that's designed.
+
+## Stills: grab the frame you're looking at (`s`)
+
+`still.rs` + a `grab_still` command + `s` in the player. One decoded frame from the
+master at the playhead, written full-resolution beside its source clip.
+
+A still is a **capture, not an export** — the decision that shapes everything else.
+It lands in `<trip>/<person>/<camera>/` next to the clip it came from, so it's
+indistinguishable from a photo the camera wrote: discovered by `masters_in`, in the
+filmstrip, pushed to the cloud, deduped by content id, ledgered, and freed by
+`archive` with the rest of the raw. Nothing downstream needed teaching about it.
+
+- **Name** `<stem>_t<ms>.jpg` — derived from the exact frame, so a repeat grab of
+  the same moment resolves to the same file instead of a second near-identical
+  picture. The grab is idempotent, and the no-op path skips ffmpeg entirely.
+- **Seek**: `-ss` *before* `-i`, deliberately unlike the caveat in `cut.rs`. That
+  keyframe limitation is a property of `-c copy`, which can't re-encode its way to
+  an in-between frame; this decodes, so accurate seek lands on the frame on screen.
+  Verified against a real 30fps encode: asked 9.4s, got the frame stamped 9.
+- **No `-vf scale`** — a poster is deliberately small (512px), a still is the picture.
+- **mtime = the moment in the footage** (source capture time + offset), because
+  `masters_in` orders by mtime — so the still sorts immediately after its source
+  rather than to the end of the trip.
+- Errors name ffmpeg's last stderr line: unlike a poster, which silently degrades
+  to a placeholder, a still was asked for by hand.
+- UI splices it into the filmstrip at that same position rather than reloading the
+  playlist, so where it appears now is where it'll be found next open.
+
+Guarded off card preview (a card isn't a trip — nowhere for a still to belong) and
+off photos (nothing to grab from a picture that already is one). 4 tests; the two
+that cover new behaviour confirmed to fail without it.
+
+## Archived is an intent, not an inference — and it leaves the dashboard
+
+Archived was derived: *zero masters AND ≥1 cut clip* (`trips::derive_state`). Three
+ways that was wrong, all of which got worse the moment archived trips were filed
+away rather than merely labelled:
+
+- A trip archived **before it was ever cut** read `Empty` — indistinguishable from a
+  trip with nothing in it.
+- Footage **lost by accident** read exactly like a deliberate archive. For a tool
+  whose first principle is "clarity is the contract", that's the wrong guess to hide
+  behind a collapsed section.
+- A trip holding a **still or a photo** would never read archived at all.
+
+`commit_archive` now writes `archived=1` into `.reel`; `derive_state` honours it —
+but only while the raw is genuinely gone, so a stale marker can't strand a trip
+whose footage came back. `restore` clears it on any file landing (a partly-restored
+trip has raw you can act on). The old inference stays as the legacy fallback so an
+existing library doesn't read as `Empty` overnight.
+
+### An archived trip keeps its face
+Cover and dates came from the masters on disk, so freeing the disk blanked the card
+as if the footage had never existed. It hasn't: the **ledger** remembers every
+capture (id + when) and the **poster cache** is keyed by that same id and lives
+outside the trip, so both survive the delete. `archived_face` reads the cover and
+the date range back out — no bytes come down, and `ensure_poster` returns on an id
+hit without ever opening the (absent) master. Best-effort: a cleared cache falls
+back to the old blank tile. The ledger is loaded once per `list_trips`, not per trip.
+
+Stats read `N in cloud` instead of `0 clips` — the one number that wasn't true.
+
+### The shelf
+`renderTrips` partitions on `state === "archived"` into a collapsed `<details>`
+below the grid, with the count always visible in the summary (filed away, never
+silently hidden). Cards there are quieter and their covers aren't clickable — an
+archived trip is a record, not a workspace. Read-only falls out of `masters === 0`,
+which already suppressed Review/Share/Sync/Archive; `Edit →` still works offline
+because `clips/` is deliberately kept local.
+
+4 tests; the two covering new behaviour confirmed to fail against the old logic.
+
+### Not done
+- **Browsing an archived trip's raw.** The ledger + poster cache could drive a full
+  filmstrip of cloud-only clips (see anything, play nothing) — the data is all there
+  and survives. Only the cover uses it today.
+- `raw_dirs` is still a blocklist of one (`clips`), so any directory a user creates
+  at the trip root is swept. Fine while reel owns the layout; wrong the moment it doesn't.
+
+## Player chrome: fewer controls, and words that mean something
+
+The header carried six controls and the footer listed **17 shortcuts permanently**
+— the "wall of controls" PRODUCT.md's principle 4 exists to prevent.
+
+### Header: six → four
+- `1 mark` merged into the button that opens them (`Marks · 1`) — one control, not a
+  readout sitting next to a button reporting the same number.
+- `Move` + the trash icon → a **⋯ menu**, the affordance trip cards and organize
+  lanes already use. No new vocabulary, and `m` / `shift+⌫` still work.
+- `you` **kept** even when the footage is mine. It's redundant in the common case,
+  but consistency won: a badge that appears only sometimes is a badge you have to
+  think about.
+
+### Footer: 17 → 9, rest behind `?`
+Visible is the actual review loop — keep/start/end/name/still, play/shuttle/seek/clip.
+Undo, delete mark, marks panel, clip ends, play zone, jump-between-marks, move and
+delete moved into a `?` panel, which also lists `esc`.
+
+### The vocabulary was the real problem
+`i`/`o` and `h` produce the **identical object** — a `Mark {master, start, end,
+label}` — differing only in how the range is picked. But "in/out" and "highlight"
+sound like two different concepts, so the UI implied a distinction that doesn't
+exist. Renamed to say what they do:
+
+| was | now | why |
+|---|---|---|
+| `i` in / `o` out | **start** / **end** | plainly two edges of one thing |
+| `h` highlight | **keep** | matches "cuts the keepers"; it's the one-press path |
+| `e` label | **name** | it's the name, and it lands in the cut filename |
+
+The `?` panel leads with the sentence the UI never said: *a mark is a piece of a clip
+worth keeping; Cut turns every mark into its own file, named after you.*
+
+Display only — the stored `hl` label and `marks.tsv` are untouched, so existing
+marks and the shell script stay interoperable.
+
+### Fixed on the way
+`loadThumb` bailed on `!ref.path`, which silently defeated the archived-trip cover:
+its footage is gone, so its `ClipRef` has no path — only the fileid the poster cache
+is actually keyed by. Now it needs *either*. Confirmed by rendering the real
+`renderTrips` headlessly: the archived cover went from blank placeholder to the
+cached poster, dimmed.
+
+## Player pass 2: centring, key remap, loop trimming, a live proxy toggle
+
+### Every dialog in the app was pinned to the top-left
+`* { margin: 0 }` (style.css:48) also matches `dialog:modal`, whose UA rule
+`margin: auto` is the *only* thing centring a modal. So import, confirm, pick,
+rename, danger, pull, share, sync and keys have all been rendering in the corner
+since the reset was written. `.dialog { margin: auto }` fixes all of them at once.
+
+Worth recording how this was missed: it showed in a headless render and got waved
+off as a headless artifact *because the pre-existing dialogs did it too* — the
+control that was supposed to isolate the bug was itself affected by it.
+
+### Keys
+- `m` → open the marks panel · `shift+m` → move the clip (was `x` / `m`).
+  `e.key` reports shift+m as `"M"`, so it's a separate case and a separate entry
+  in the preview guard string.
+- `x` → delete the selected mark, alongside `del`/`backspace`.
+- The panel spells out `del` and `backspace` instead of drawing `⌫`, which didn't
+  say which key it meant (both work). Same fix in the organize board's hints.
+
+### `h` is a highlight again, and it looks backwards
+Renaming it "keep" made it *less* clear, so it's reverted. The window flipped
+though: it was `[t-2s, t+8s]`, inherited from the script — mostly footage you
+hadn't watched yet, when `h` is pressed precisely *because* you just saw
+something. Now `[t-8s, t+2s]`.
+
+### A loop you can act on
+`ctrl+shift+space` looped silently, which reads as a clip that won't end. Now a
+`⟳ 0:03 – 0:11 <name>` pill in the trip's colour (opposite corner from the speed
+readout, so the two can't collide), and — the reason to loop at all — **`i`/`o`
+retrim the looping mark** instead of starting a new one. `P.zoneMark` tracks which
+mark the zone belongs to; the loop tick reads the edges live, so moving the out
+point under the playhead restarts the loop immediately, which is the confirmation
+you want. Edits save through the normal debounce.
+
+### The proxy pill was a dead button
+It went `disabled` the moment a proxy was playing — so it looked like a control,
+did nothing, and left no way to check the real picture. Now it names what you're
+watching and clicking always switches to the other one: proxy ⇄ master when a
+proxy exists, build-a-proxy when one doesn't. `showMaster` rides on the clip so
+the choice survives a reload, and a master that won't decode (HEVC, the reason
+proxies exist) drops back to the proxy with a toast rather than claiming the clip
+is broken.
+
+### Trimming a mark: nudge the edges, park on the frame
+Setting an edge *at the playhead* is the wrong primary gesture — you can't see
+where the edge actually lands, because the picture is moving. With a segment up,
+`shift+←/→` walks the **start** and `ctrl+←/→` walks the **end** (`TRIM_STEP`,
+0.5s), each parking the picture **paused on that edge** so you see the exact
+frame; `ctrl+shift+space` picks the loop back up on the new range. `i`/`o` stay
+as the coarse "jump this edge to the playhead".
+
+Both modified-arrow bindings are overloaded only while a zone is live —
+fine-seek and hop-between-marks aren't what you're doing with a segment on
+screen — and the pill names whichever mode you're in. Parking suspends the wrap
+(`zoneFree`), or landing on the end would instantly fling the playhead back to
+the start and you'd never see the frame you set. Retrim also syncs `P.selected`,
+so Ctrl+Shift+Space resumes *that* mark rather than whatever was selected before.
+
+### A loop you could only ever shrink
+First cut of the retrim was wrong: `i`/`o` set the edge *at the playhead*, and
+during a loop the playhead never leaves `[start, end]` — so a mark could be
+narrowed but never widened. Seeking now keeps a running loop alive (`zoneSeek`
+instead of `clearZone` in `nudge` / `seekFromEvent` / `goToEnds`) and suspends the
+wrap (`zoneFree`) so you can travel outside the range and set the new edge there.
+Retrim clears the flag and replays from the new start. Pause (`k`/space) doesn't
+touch the zone, so pause-scrub-set gives a frame-precise edge.
+
+### Still open
+- `x` deletes whatever `P.selected` points at, which may be a mark on another
+  clip if the panel selection is stale. Pre-existing (`⌫` did the same), but the
+  new binding makes it easier to hit.
+
+
+## Archived trips offer one action: bring it back
+
+`Edit →` on an archived trip was wrong even though it worked — `clips/` is still
+local, so Kdenlive would open, but there's no way to change a single edge without
+the raw, and a primary button reading "Edit" says "ready to work on" about a trip
+that is the opposite. `footActions` now short-circuits on `state === "archived"`
+to a single `↓ Restore`, which opens the Sync panel with `restoreCloud`
+preselected (`openSync(t, preselect)`) — that checkbox is deliberately off by
+default, so a button labelled Restore had to tick it or it would have landed you
+on a panel that does nothing.
+
+`cut` stays. It's the only path that produces standalone files you can hand
+someone without a project, and `count_clips` feeds `TripState`.
+
+
+## The zone tick, wrong twice — now a pure function behind a test
+
+`ctrl+←/→` trimmed a segment's end exactly once; the next press hopped to an
+unrelated mark. `shift+←/→` was fine, which is the tell: it parks the playhead on
+`m.start`, which never trips the end-of-zone tick, while `ctrl` parks on `m.end`,
+which trips it every time. The `zoneFree` guard (playhead is out here on purpose —
+don't touch it) had been applied to the **loop** branch but not the **one-shot**
+branch, so `ctrl+space` + `ctrl+→` ran `clearZone()` and the zone vanished; the
+next `ctrl+→` then found `zoneMark == null` and fell through to
+`gotoAdjacentMark`.
+
+That's twice this same tick has been wrong — first shrink-only, now this — both
+times only reachable through one specific key sequence, and both times invisible
+in a screenshot. So it's out of `updateTime` and into `zoneAction(t, z)`, pure and
+total: no zone or before the end → `none`; `free` → `none` **whatever the mode**;
+else loop → `wrap`, one-shot → `stop`.
+
+`tests/zone.test.mjs` regexes the function out of `ui/app.js` and exercises it, so
+the test can't drift from the source. Wired into `make test`. Lives at the repo
+root, not in `ui/` — `frontendDist` is `../ui`, so anything in there is embedded
+into the shipped binary. Both bug cases confirmed to return the wrong answer
+against the previous logic.
+
+## Marks as one Kdenlive timeline, not just a pile of cut files
+
+`edit` handed Kdenlive a *folder of files* — `clips/*.mp4` if the trip had been cut,
+else the raw masters — and left assembling them to you. Now it hands over a
+**project**: `<trip>/<trip>.kdenlive`, every mark laid end to end in capture order,
+each one named, referencing the **master with in/out points**.
+
+Referencing masters rather than the cut files is the whole point. A cut file has no
+handles — trimmed is trimmed — so an edge you got slightly wrong in reel is wrong
+forever downstream. Against the master, every edge is still draggable in both
+directions. `cut` stays exactly as it was: it's the only thing that produces
+standalone files you can hand someone without a project, and `count_clips` still
+feeds `TripState`.
+
+- `timeline.rs` — `build_timeline` writes the project; `timeline_xml` is pure (no
+  filesystem, no ffmpeg) so the frame arithmetic is testable without rendering video.
+- `edit::open_in_editor` prefers a timeline and falls back to the old loose-file
+  hand-off when there isn't one (no marks, or an archived trip with only `clips/`
+  left). A failed build is never fatal — it degrades to the previous behaviour.
+- Reuses `cut::locate` (now `pub(crate)`), so a renamed trip builds a timeline
+  exactly as well as it cuts — one recovery rule, not two that drift.
+- A **marked** trip gets a secondary `▤ Edit` on its card. Cutting was never a
+  prerequisite for editing; it just happened to be the only way to reach the button.
+
+### What the format actually required (confirmed against MLT 7.40, not assumed)
+- `<entry in= out=>` are **frame numbers into the source**, not timeline positions
+  and not seconds. Verified by rendering a 10-colour-per-second reference clip and
+  checking which colour came out where.
+- `out` is **inclusive** — `out - in + 1` frames. Two 121-frame clips serialize to a
+  tractor with `out="241"`.
+- A Kdenlive track is a `<tractor>` over *two* `<playlist>`s, and the split between
+  picture and sound is `hide="video"` / `hide="audio"`. Get those backwards and the
+  render is **silent** — checked with `volumedetect` (-24 dB, not -91), because "has
+  an audio stream" is not the same as "has sound".
+- Real footage set the requirements, not synthetic files: masters with **spaces** in
+  their names, **1080x1920 portrait** drone footage next to 4K, `sample_aspect_ratio`
+  reported as `N/A` everywhere, VFR clips whose `r_frame_rate` (30/1) and
+  `avg_frame_rate` (22525/751) disagree, and one master with **no moov atom** at all.
+  Hence: DAR computed from real pixels, `N/A` read as square, `r_frame_rate` as the
+  timebase, and an unreadable master skipped-and-counted rather than fatal.
+
+### The bug the render could not have caught
+First version set each bin producer's length to the **last mark's end** instead of the
+master's real length. It renders byte-identically — but in Kdenlive the bin clip then
+*ends* at the mark, so its edges only move inward, which is precisely the cut-file
+limitation this whole feature exists to escape. Found by reading the emitted XML
+against `ffprobe`'s real durations (2228/1232/710 frames vs the capped 1940/1134/480).
+Regression test asserts the bin entry reaches the end of the media.
+
+Same class, caught in the same pass: a **silent** source must leave a `<blank>` of
+equal length on the audio track. Skipping its entry slides every later audio clip
+earlier and desyncs the whole track — audible, invisible in the XML.
+
+### melt was not an acceptance test, and three bugs hid behind that
+
+`melt` renders the document. Kdenlive *opens* it. Those turned out to be very
+different bars, and everything below rendered perfectly in melt while being wrong.
+
+**1. Flat layout → Kdenlive hangs.** Kdenlive 23.08+ stores the timeline as a
+*sequence*: a tractor whose `id` is a UUID, tagged `kdenlive:producer_type=17`,
+listed in the bin and pointed at by `docproperties.activetimeline`. The older flat
+`projectTractor` layout is valid MLT — melt rendered it, 60 frames, no errors — and
+Kdenlive will not open it. Measured both ways: sequence layout renders 125 frames,
+flat layout times out having written 8 log lines against a healthy run's 424.
+
+**2. Guides written to the wrong property → no guides.** They live in
+`kdenlive:sequenceproperties.guides` **on the sequence tractor**
+(`timelineitemmodel.cpp:905`). `docproperties.guides` is a legacy upgrade target;
+writing there loses every guide silently, which was the whole user-visible ask.
+
+**3. `docproperties.profile` — both wrong answers are bad.** That field *is* the
+project profile and takes a resolvable identifier (`uhd_2160p_2398`), never a
+description and never a path (both hang). But omitting it is worse than hanging:
+Kdenlive falls back to its own default and silently renders 1080x1920 footage as
+**720x576 PAL**. The real trip did exactly that — 719 frames, right length, wrong
+shape and rate, no warning anywhere.
+
+The failure is also *conditional*, which is why it survived so long: an unresolvable
+name is harmless at 30/1 and fatal at 24000/1001. Every synthetic 30 fps fixture
+passed while every real trip in this library — all DJI, all 24000/1001 — would have
+hung. Found by bisecting three variables against Kdenlive itself: 3 sources ✓,
+portrait ✓, fractional rate ✗.
+
+So the name is now *looked up* in MLT's profile set (`stock_profile_name`) and
+emitted only on an exact match. Coverage is decent — `uhd_2160p_2398` is precisely
+what the DJI 4K masters are — but portrait at 23.98 matches nothing, so
+`TimelineResult.profile_id` is `None` and the toast tells you to set the project
+profile rather than letting the picture come out the wrong shape in silence.
+
+### Verified — against Kdenlive, not just melt
+`kdenlive --render` under `QT_QPA_PLATFORM=offscreen` with sandboxed XDG dirs is a
+real acceptance test: it runs Kdenlive's own document loader. A load failure is
+legible as ~8 log lines vs ~424, and the render output can be probed frame by frame.
+
+- Kdenlive opens the generated project and renders it: colour-per-second reference
+  clip comes out yellow at frame 5 and orange at frame 40, i.e. the right source
+  frames in the right order, with audio at -24 dB rather than silence.
+- Stock-profile path end to end: 1920x1080 @ 23.98 footage emits `atsc_1080p_2398`
+  and Kdenlive renders **1920x1080 @ 24000/1001, 48 frames** — exact.
+- The real `party` trip (3 marks, 3 portrait 4K HEVC masters) loads and renders
+  **719 frames**, matching the frame arithmetic exactly, with audio.
+- Bin clips span the **whole** master (2228/1232/710 frames), so edges drag outward.
+- Guides round-trip through XML-unescape into valid JSON at the right frames.
+
+Still unverified: how it *looks* in the GUI — that the clips read as linked A/V pairs
+on their tracks and the guides show on the ruler. `--render` proves the document
+loads and the timeline resolves; it can't prove the timeline model was rebuilt the
+way a human would want to see it. One open in the GUI settles it.
+
+### Follow-ups not taken
+- A custom MLT profile for formats with no stock preset (portrait at 23.98). Kdenlive
+  keeps its profile repository outside the project; writing one into the user's
+  `~/.local/share/kdenlive/profiles/` was tried and did not resolve, so this needs
+  more digging than it was worth here.
+- `kdenlive:proxy` could point at the proxies reel already built under
+  `<trip>/.proxies/`, so a 4K HEVC timeline opens smooth instead of stuttering.
+  Skipped: coverage is partial (only clips with a native `.LRF`/`.LRV`, only once
+  reviewed) and `archive` sweeps `.proxies`, so the reference would rot.
+- The project references masters, so archiving leaves a dead `.kdenlive` behind. Same
+  "restore first" rule that already governs an archived trip; not special-cased.
+
+## Field notes from the first real open (all three fixed or pinned down)
+
+**Proxies — the timeline was ignoring work reel had already done.** Playback of a
+4K HEVC trip was "very slow", and the cause was sitting right there: reel builds
+720p h264 proxies under `<trip>/.proxies/` while you review, and the export pointed
+Kdenlive at the masters anyway. They're a remux of the camera's own low-res track,
+so they carry the **same frame count and rate** — 332 frames at 24000/1001 either
+way — which is the only thing that makes them safe to substitute frame-for-frame.
+Now `resource` is the proxy, the master rides in `kdenlive:originalurl`, and
+`enableproxy=1`. Verified: Kdenlive edits against the 12 MB proxy and still renders
+**3840x2160 @ 24000/1001** from the 113 MB master. No quality cost.
+
+- **Landmine, deliberately accepted:** Kdenlive **segfaults** on load if
+  `kdenlive:proxy` names a missing file — reproducibly, and regardless of whether
+  `resource` points at the proxy or the master. Proxies are a cache, so the rule is
+  never to write the property unless the file existed at build time (there's a test).
+  Clearing `.proxies` by hand still breaks a *previously generated* project; the fix
+  is to hit Edit again, which regenerates it. Archive sweeps `.proxies` and the
+  masters together, so an archived trip's project was already dead either way.
+
+**Cut/Edit swapped sides between cards.** They were placed by pipeline position —
+whichever was "next" went last as the primary — so a Marked trip read
+`Archive | Edit | Cut` and a Cut trip read `Archive | Cut | Edit`. The pipeline
+framing is what stopped being true: with the timeline you no longer have to cut
+before you can edit. Cut is an optional deliverable, Edit is the destination. So
+once a trip has marks, the order is fixed — Cut ghost, Edit primary, rightmost —
+regardless of whether it's been cut.
+
+**Portrait footage hits a Kdenlive guardrail there's no way around.**
+*"The project uses a non standard framerate (23.98), this will result in misplaced
+clips and frame offset."* — a modal, so headlessly it reads as a hang, which is why
+it took a screenshot to identify. What Kdenlive actually does:
+
+| project profile | result |
+|---|---|
+| stock preset at 23.98 (`uhd_2160p_2398`) | opens clean |
+| non-stock **size** at an integer rate | Kdenlive silently invents a custom profile |
+| non-stock size at a **fractional** rate | this warning |
+
+It really does auto-create custom profiles — `customprofile0`/`customprofile1`
+appeared in the sandbox data dir, described with reel's own `describe()` string.
+But it refuses fractional rates, and pre-installing a matching custom profile in
+`~/.local/share/kdenlive/profiles/` does **not** suppress it (tested). So this is
+Kdenlive policy, not something reel can configure away. `1080x1920 @ 23.98` — three
+of the four marked trips here — gets one dialog to dismiss. Landscape 4K matches
+`uhd_2160p_2398` and is unaffected.
+
+Not attempted: suppressing the dialog by writing a "don't ask again" key into the
+user's `kdenliverc`. reel has no business editing another app's config to hide that
+app's warning.
+
+## The portrait dialog: conforming the rate, and a hole in the acceptance test
+
+Opening a portrait trip put up a modal — *"The project uses a non standard framerate
+(23.98), this will result in misplaced clips and frame offset"* — that could not be
+dismissed, so those trips were unusable, not merely noisy. Three of the four marked
+trips here are portrait drone footage.
+
+**The rule, measured.** Kdenlive rejects a **fractional rate on non-standard
+geometry**. It is not about the rate alone and not about the profile's name:
+
+| project profile | 23.98 | result |
+|---|---|---|
+| 1920x1080 (matches a shipped preset) | yes | opens |
+| 320x240 (nothing shipped like it) | yes | dialog |
+| 320x240 | no (30/1) | opens — Kdenlive silently invents a profile |
+
+A renamed byte-for-byte copy of a shipped 23.98 profile opens fine, while a genuine
+custom profile at 23.98 does not — so it's the *parameters* being non-standard that
+trips it, not where the profile lives or what it's called. Custom profiles were
+tested in Kdenlive's own file format (`bottom_field_first` and all), in its own
+`~/.local/share/kdenlive/profiles/`, under several names. None of it helps.
+
+**So `conform`**: when no stock profile matches and the rate is fractional, round it
+to the nearest whole number — 23.976 → 24, a 0.1% difference, under one frame across
+a 30 s timeline — and compute every frame position against *that* rate, so clips move
+together instead of sliding against each other. Footage that already matches a stock
+profile is left exactly alone (4K landscape at 23.98 is `uhd_2160p_2398`). The user
+chose this over `vertical_hd_30` (guaranteed standard, but a 23.98→30 conversion with
+visible judder) and over keeping the dialog.
+
+`TimelineResult.conformed_from` carries the footage's real format so the toast can
+say so. A rate change is small here but it is still a change to the footage's own
+timing, and it should never happen silently.
+
+### The acceptance test has a hole, and it's worth writing down
+`kdenlive --render` catches *document* failures — a bad layout hangs on a modal and
+writes ~8 log lines instead of ~424 — which is how the sequence-layout and
+profile-name bugs were found. But **it does not take the same path as opening the
+project in the GUI**: the identical portrait project renders happily headless and
+still raises the dialog on open. So this fix rests on the measured rule above, not on
+a green test, and it needs a human open to confirm.
+
+Two claims in the earlier notes were too strong on exactly this point: "verified
+against Kdenlive, not just melt" was true of document loading and false of anything
+the GUI does afterwards. `melt` → `kdenlive --render` → *actually opening it* are
+three different bars, and each one caught bugs the previous had passed.
+
+**Confirmed working on hardware 2026-07-21**: the dialog is gone and portrait trips
+open and edit. So the conform rule holds in the GUI, not just in theory — but it was
+confirmed by a person opening the project, which remains the only way to test this
+layer.
