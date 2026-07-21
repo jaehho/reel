@@ -1620,53 +1620,43 @@ fn cuts_marked_ranges_into_clips() {
 
 // ---- edit: hand-off to the external editor ----
 
+/// Edit builds a timeline or it errors — it never opens something else instead.
+/// The loose-file hand-off used to catch every build failure, so a trip with no
+/// marks and an archived trip both quietly opened their masters or their `clips/`.
+/// That's the confusing outcome: not the timeline, and not an error either. Now the
+/// build's own reason is what comes back, and for archived raw it says to restore.
 #[test]
-fn edit_prefers_the_cut_over_the_masters() {
-    let d = tempfile::tempdir().unwrap();
-    let lib = d.path().join("Videos");
-    let trip = make_trip(&lib, "trip");
-    touch(&trip.join("jaeho/dji/DJI_0001.MP4"), 1, 1000, 1_700_000_000);
-    touch(&trip.join("clips/DJI_0001_c01.mp4"), 1, 500, 1_700_000_000);
-
-    // A cut trip opens its clips, not the raw masters.
-    let media = reel_core::edit::media_for(&trip);
-    assert_eq!(media, vec![trip.join("clips/DJI_0001_c01.mp4")]);
-}
-
-#[test]
-fn edit_falls_back_to_masters_before_a_cut() {
-    let d = tempfile::tempdir().unwrap();
-    let lib = d.path().join("Videos");
-    let trip = make_trip(&lib, "trip");
-    // Two masters, no clips/ yet — capture-ordered so they open in sequence.
-    touch(&trip.join("jaeho/dji/DJI_0002.MP4"), 1, 1000, 1_700_000_100);
-    touch(&trip.join("jaeho/dji/DJI_0001.MP4"), 1, 1000, 1_700_000_000);
-
-    let media = reel_core::edit::media_for(&trip);
-    assert_eq!(
-        media,
-        vec![
-            trip.join("jaeho/dji/DJI_0001.MP4"),
-            trip.join("jaeho/dji/DJI_0002.MP4"),
-        ],
-        "no cut yet → open the masters, capture-ordered"
-    );
-}
-
-#[test]
-fn edit_errs_on_empty_or_bogus_trip() {
+fn edit_errs_rather_than_opening_loose_files() {
     let d = tempfile::tempdir().unwrap();
     let lib = d.path().join("Videos");
     let c = cfg(&lib, &d.path().join("state"), None);
-    make_trip(&lib, "trip"); // .reel only, nothing to open
+    let trip = make_trip(&lib, "trip");
 
-    assert!(reel_core::edit::media_for(&lib.join("trip")).is_empty());
+    // Masters and a finished cut — everything the fallback used to hand over — but
+    // no marks, so there's no timeline and that's what you're told.
+    touch(&trip.join("jaeho/dji/DJI_0001.MP4"), 1, 1000, 1_700_000_000);
+    touch(&trip.join("clips/DJI_0001_c01.mp4"), 1, 500, 1_700_000_000);
     assert!(
         reel_core::open_in_editor(&c, "trip")
             .unwrap_err()
-            .contains("nothing to edit"),
-        "an empty trip has nothing to hand off"
+            .contains("no marks"),
+        "an unreviewed trip says so instead of opening its clips"
     );
+
+    // An archived trip: marks and clips/ survive, the raw doesn't. This is the case
+    // the fallback most obscured — it opened the leftover cut, which looks enough
+    // like a working edit to be worth mistaking for one. Say the raw is gone instead.
+    fs::write(
+        trip.join("marks.tsv"),
+        "# header\njaeho/dji/DJI_0009.MP4\t1.0\t2.0\tgone\n",
+    )
+    .unwrap();
+    let err = reel_core::open_in_editor(&c, "trip").unwrap_err();
+    assert!(
+        err.contains("archived or missing") && err.contains("Restore it first"),
+        "archived raw names itself and says what to do: {err}"
+    );
+
     assert!(
         reel_core::open_in_editor(&c, "../etc").is_err(),
         "a path-y name is rejected before any launch"

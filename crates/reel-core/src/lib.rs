@@ -46,11 +46,11 @@ pub use import::import_window;
 pub use model::{
     ArchivePlan, ArchiveProgress, ArchiveResult, CardInfo, ClipHealth, ClipRef, Contributor,
     CutProgress, CutResult, DeleteResult, DupCopy, DupGroup, DupLoc, DupProgress, DupReport,
-    DupResolution, DupResolveResult, EditResult, ImportProgress, ImportResult, Mark, MoveResult,
-    Playlist, PullProgress, PullResult, PushPhase, PushProgress, PushResult, ReclaimPlan,
-    ReclaimResult, RestoreResult, ReviewClip, Session, Share, Sharee, StillResult, SyncActions,
-    SyncBrief, SyncItem, SyncPhase, SyncProgress, SyncResult, TimelineResult, Trip, TripShare,
-    TripState, TripSync, WipePhase, WipeProgress,
+    DupResolution, DupResolveResult, ImportProgress, ImportResult, Mark, MoveResult, Playlist,
+    PullProgress, PullResult, PushPhase, PushProgress, PushResult, ReclaimPlan, ReclaimResult,
+    RestoreResult, ReviewClip, Session, Share, Sharee, StillResult, SyncActions, SyncBrief,
+    SyncItem, SyncPhase, SyncProgress, SyncResult, TimelineResult, Trip, TripShare, TripState,
+    TripSync, WipePhase, WipeProgress,
 };
 pub use organize::{merge_trips, move_clips, rename_trip};
 pub use proxy::{ensure_card_proxy, ensure_proxy};

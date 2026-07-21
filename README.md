@@ -70,9 +70,9 @@ The engine honours the same env knobs as the script (`REEL_LIB`, `REEL_REMOTE`,
 - [x] **2 — Cut**: marked ranges → `clips/`, lossless (one ffmpeg stream-copy per
   mark, `-ss/-to` before `-i`, primary v+a only), with live per-clip progress on
   the trip card. Additive and re-runnable: existing clips are left untouched, so
-  adding marks and cutting again only writes the new ones. **Edit** then hands the
-  finished cut to Kdenlive (its masters, if it hasn't been cut yet), launched
-  detached — the last step that used to live only in the `reel` script.
+  adding marks and cutting again only writes the new ones. **Edit** is the other
+  way out: the trip's marks become one `.kdenlive` timeline against the masters,
+  launched detached. Cut writes standalone files; Edit is where you go to work.
 - [x] **3 — Import + session picker + cloud**: card→workspace copy + ledger write,
   then rclone push/verify to the shared cloud. Import is session-scoped with live
   progress, dedup, and capture-time preserved; **Share** uploads your masters,

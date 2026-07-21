@@ -1253,3 +1253,43 @@ what was wrong, so the workaround is gone with it.
 `cutting_does_not_advance_a_trip` pins it end to end: same state and same next step
 before and after clips appear, with the count as the only difference (102 tests).
 
+## Edit builds a timeline or it says why
+
+`open_in_editor` used to swallow a failed build and hand Kdenlive loose files
+instead — the cut if there was one, else the masters. That fallback predates the
+timeline, from when loose files were the only hand-off there was.
+
+It only ever fired for two reasons, and both are things you want to hear:
+
+- **no marks yet** — the trip hasn't been reviewed;
+- **the raw is archived** — `clips/` and `marks.tsv` survive an archive, so a
+  timeline can't be built but the leftover cut still opens.
+
+The second is the worse one. What came up looked enough like a working edit to be
+mistaken for one, and nothing said the masters were gone. `build_timeline` already
+had a clear message for each case (the archived one ends "Restore it first") and
+the fallback was throwing them away.
+
+- The fallback is gone. `build_timeline(cfg, trip)?` — its error is the answer.
+- `media_for`/`clips_in` deleted with it. That was the whole of the old `cmd_edit`.
+- `EditResult` deleted: with one path in, `files` was always 1 and `timeline` always
+  `Some`. `open_in_editor` returns `TimelineResult` directly, and the UI's
+  `if (!tl)` branch went with it.
+- Trip-name and `.reel` checks stay in `edit.rs` ahead of the `on_path` check, so a
+  bogus name is still rejected before a missing editor is.
+
+`edit_errs_rather_than_opening_loose_files` covers both: a trip with masters *and* a
+finished cut but no marks errors instead of opening either, and marks pointing at
+missing raw name the archive and say to restore (100 tests — the two `media_for`
+cases went with the function).
+
+### Proxies: what reel owns vs. what Kdenlive owns
+Worth writing down, since it looked like duplicated work. reel builds proxies under
+`<trip>/.proxies/` for **its own player** — the review GUI is a webview that can't
+decode HEVC and can't demux an `.LRF`'s telemetry/MJPEG tracks. That's unavoidable
+and unrelated to editing. The timeline export then *reuses* that cache if it's
+there (`kdenlive:proxy` + `kdenlive:originalurl`), and sets `generateproxy=0` so
+Kdenlive doesn't build its own. Kdenlive is pointed at reel's **remux**, never the
+raw `.LRF`. Coverage is partial by nature: only clips you actually reviewed have a
+proxy, and unreviewed masters play at full res.
+

@@ -1024,13 +1024,12 @@ async function startCut(t, card) {
 
 // Hand the trip off to Kdenlive — the pipeline's last step. The editor is
 // launched detached engine-side, so this returns as soon as it's handed over.
-// Normally that hand-off is a built timeline (every mark, in order, against its
-// master); a trip with no marks still opens its loose files the old way.
+// The hand-off is always a built timeline: every mark, in order, against its
+// master. Anything that stops the build throws instead of opening something else,
+// so the catch below is the only other outcome.
 async function openInEditor(t) {
   try {
-    const r = await invoke("open_in_editor", { trip: t.name });
-    const tl = r.timeline;
-    if (!tl) return toast(`Opening ${plural(r.files, "clip")} in Kdenlive…`);
+    const tl = await invoke("open_in_editor", { trip: t.name });
     // Name what was left out rather than quietly building a shorter timeline —
     // a mark whose raw is archived can't be placed, and a silent drop would read
     // as reel losing it.

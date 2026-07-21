@@ -679,18 +679,6 @@ pub struct StillResult {
     pub bytes: u64,
 }
 
-/// What `edit` handed to Kdenlive. Either a built timeline (the good path) or a
-/// count of loose files (the fallback for a trip with no marks, or an archived one
-/// with only its cut left).
-#[derive(Serialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct EditResult {
-    /// Files handed over — `1` when that file is the project.
-    pub files: usize,
-    /// The project that was built, when one was.
-    pub timeline: Option<TimelineResult>,
-}
-
 /// Where a trip's marks landed as a Kdenlive timeline. The counterpart to
 /// `CutResult`: `cut` reports files written, this reports one project holding every
 /// mark as a clip that can still be re-trimmed against its master.

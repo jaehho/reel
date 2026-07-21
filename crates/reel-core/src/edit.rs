@@ -1,19 +1,15 @@
-//! Hand a trip's cut off to an external editor — the pipeline's final step, and
-//! the last piece that lived only in the `reel` script. Ports its `cmd_edit`:
-//! open the trip's `clips/*.mp4` (or, for a trip that hasn't been cut, its
-//! masters) in Kdenlive. reel is a cutting pipeline, not an NLE — the actual
-//! editing hands off to Kdenlive (see PRODUCT.md), so this is where reel's job
-//! ends. The editor is launched fully detached, so closing reel never takes it
-//! down and reel never waits on the editing session.
+//! Hand a trip off to Kdenlive as a timeline. reel reviews and marks, it isn't an
+//! NLE — the actual editing happens in Kdenlive (see PRODUCT.md), so this is where
+//! reel's job ends. The editor is launched fully detached, so closing reel never
+//! takes it down and reel never waits on the editing session.
 
 use crate::config::Config;
-use crate::media::masters_in;
-use crate::model::EditResult;
-use std::path::{Path, PathBuf};
+use crate::model::TimelineResult;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-/// The editor reel hands a finished cut to. Matches the script's hardcoded
-/// `kdenlive` — reel doesn't edit, it hands off.
+/// The editor reel hands a trip to. Matches the script's hardcoded `kdenlive` —
+/// reel doesn't edit, it hands off.
 const EDITOR: &str = "kdenlive";
 
 fn valid_trip(name: &str) -> bool {
@@ -27,84 +23,36 @@ fn on_path(bin: &str) -> bool {
         .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file()))
 }
 
-/// A trip's cut clips (`clips/*.mp4`), name-sorted so they open in cut order.
-fn clips_in(dir: &Path) -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = std::fs::read_dir(dir.join("clips"))
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.extension()
-                .and_then(|x| x.to_str())
-                .map(|x| x.eq_ignore_ascii_case("mp4"))
-                .unwrap_or(false)
-        })
-        .collect();
-    v.sort();
-    v
-}
-
-/// What `edit` would open for a trip: the finished cut if there is one, else the
-/// raw masters (so a not-yet-cut trip is still openable, matching the script).
-/// Pure resolution, no launch — the tested core of `open_in_editor`.
-pub fn media_for(dir: &Path) -> Vec<PathBuf> {
-    let clips = clips_in(dir);
-    if clips.is_empty() {
-        masters_in(dir)
-    } else {
-        clips
-    }
-}
-
-/// Open `trip` in the editor.
+/// Open `trip` in the editor as a timeline.
 ///
-/// Prefers a **timeline**: when the trip has marks whose raw is still on disk,
 /// `timeline::build_timeline` writes a `.kdenlive` laying every mark end to end
-/// against its master, and that project is what opens. It's the better hand-off in
-/// every way that matters — the segments are already in order, each one is named,
-/// and because they point at the master rather than a cut file, an edge is still
-/// draggable once you're in there.
+/// against its master, and that project is what opens. Because the segments point
+/// at the master rather than a cut file, an edge is still draggable once you're in
+/// there.
 ///
-/// Falls back to handing over loose files (the cut, else the masters) when there's
-/// no timeline to build: a trip with no marks, or an archived one whose raw is gone
-/// and whose `clips/` are all that's left. That's the old behaviour, kept because
-/// those are exactly the cases where it's still the only thing that works.
+/// There is no second way in. Handing over loose files — the cut, else the masters
+/// — used to be the fallback whenever the build failed, but a build only fails for
+/// reasons you want to hear about: no marks yet, or the raw is archived. Opening
+/// *something* anyway turned both into a surprise, since what came up was neither
+/// the timeline nor an error. `build_timeline`'s own message says which it was, and
+/// for the archived case it says to restore first, so that message is the answer.
 ///
-/// `Err` on a bad/empty trip or a missing editor.
-pub fn open_in_editor(cfg: &Config, trip: &str) -> Result<EditResult, String> {
+/// `Err` on a bad trip, a missing editor, or anything that stopped the build.
+pub fn open_in_editor(cfg: &Config, trip: &str) -> Result<TimelineResult, String> {
     if !valid_trip(trip) {
         return Err(format!("invalid trip name: {trip:?}"));
     }
-    let dir = cfg.lib.join(trip);
-    if !dir.join(".reel").is_file() {
+    // Checked here rather than left to `build_timeline`, so a bogus name is rejected
+    // before a missing editor is — the cheaper, more specific complaint wins.
+    if !cfg.lib.join(trip).join(".reel").is_file() {
         return Err(format!("no such trip: {trip}"));
     }
     if !on_path(EDITOR) {
         return Err(format!("{EDITOR} isn't installed — run 'make sync'"));
     }
-    // A failed build is never fatal here: the loose-file hand-off below still works,
-    // and refusing to open the editor at all because the project couldn't be written
-    // would be a worse outcome than the one the user had before this existed.
-    if let Ok(t) = crate::timeline::build_timeline(cfg, trip) {
-        let project = PathBuf::from(&t.path);
-        launch(&[project])?;
-        return Ok(EditResult {
-            files: 1,
-            timeline: Some(t),
-        });
-    }
-    let media = media_for(&dir);
-    if media.is_empty() {
-        return Err(format!(
-            "nothing to edit in '{trip}' — import or cut it first"
-        ));
-    }
-    launch(&media)?;
-    Ok(EditResult {
-        files: media.len(),
-        timeline: None,
-    })
+    let t = crate::timeline::build_timeline(cfg, trip)?;
+    launch(&[PathBuf::from(&t.path)])?;
+    Ok(t)
 }
 
 /// Hand `media` to the editor, fully detached.
