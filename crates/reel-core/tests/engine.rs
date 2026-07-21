@@ -1202,6 +1202,97 @@ fn playlist_plays_a_cached_proxy_when_present() {
     assert!(!pl.clips[0].has_proxy);
 }
 
+/// A proxy exists to be scrubbed, so it's built all-intra: every frame a keyframe,
+/// which is one decode per seek instead of walking forward from the last keyframe.
+/// The native-proxy path used to be a straight remux, which was cheaper but carried
+/// the camera's own long GOP (~1 keyframe per 26 frames on real DJI footage) into
+/// both the marking scrubber and the Kdenlive timeline this file is handed to.
+///
+/// Frame count and rate have to survive the re-encode untouched — a mark is stored
+/// against the master's timeline, so a proxy that drifts by even a frame puts every
+/// mark in the wrong place.
+#[test]
+fn a_proxy_is_all_intra_and_frame_for_frame() {
+    if !have_ffmpeg() {
+        eprintln!("ffmpeg not found; skipping proxy recipe test");
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let trip = make_trip(&lib, "trip");
+    let master = trip.join("jaeho/dji/DJI_0001.MP4");
+    fs::create_dir_all(master.parent().unwrap()).unwrap();
+    // Long GOP on the way in (keyint 30), so an all-intra result can only come from
+    // the recipe rather than from the source happening to be intra already.
+    assert!(
+        std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=15:duration=4",
+                "-c:v",
+                "libx264",
+                "-g",
+                "30",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&master)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false),
+        "ffmpeg should synth a long-GOP test master"
+    );
+
+    let c = cfg(&lib, &d.path().join("state"), None);
+    let proxy = reel_core::ensure_proxy(&c, "trip", &master).expect("a built proxy");
+
+    let count = |path: &std::path::Path, args: &[&str]| -> usize {
+        let out = std::process::Command::new("ffprobe")
+            .args(["-v", "error", "-select_streams", "v:0"])
+            .args(args)
+            .arg(path)
+            .output()
+            .expect("ffprobe runs");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count()
+    };
+    let frames = |p: &std::path::Path| {
+        count(
+            p,
+            &["-count_frames", "-show_entries", "frame=pts", "-of", "csv"],
+        )
+    };
+    let keys = |p: &std::path::Path| {
+        count(
+            p,
+            &[
+                "-skip_frame",
+                "nokey",
+                "-show_entries",
+                "frame=pts",
+                "-of",
+                "csv",
+            ],
+        )
+    };
+
+    let (mf, pf) = (frames(&master), frames(&proxy));
+    assert_eq!(pf, mf, "the proxy carries the master's frame count exactly");
+    assert!(mf > 30, "the master spans more than one GOP: {mf}");
+    assert!(
+        keys(&master) < mf,
+        "the source really was long-GOP, so the assert below means something"
+    );
+    assert_eq!(keys(&proxy), pf, "every frame of the proxy is a keyframe");
+}
+
 fn have_ffmpeg() -> bool {
     std::process::Command::new("ffmpeg")
         .arg("-version")

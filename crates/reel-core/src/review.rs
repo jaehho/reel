@@ -115,7 +115,8 @@ pub fn review_playlist(cfg: &Config, trip: &str) -> Result<Playlist, String> {
         .map(|m| {
             // Play a cached clean proxy if we've built one; never the raw native
             // proxy (its extra streams break the webview) or, ideally, a huge
-            // master. `has_proxy` tells the UI a fast remux source is on hand.
+            // master. `has_proxy` tells the UI a cheap source to build from is on
+            // hand, so the build is a 720p re-encode rather than a 4K HEVC one.
             let cached = dir
                 .join(".proxies")
                 .join(format!("{}.mp4", rel_stem(m, &dir)));

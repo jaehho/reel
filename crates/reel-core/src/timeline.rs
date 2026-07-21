@@ -1074,10 +1074,11 @@ pub fn build_timeline(cfg: &Config, trip: &str) -> Result<TimelineResult, String
             continue;
         }
         let info = probes.get(&s.master);
-        // The proxy reel built while you were reviewing, if it's still there. Same
-        // frame count and rate as the master (it's a remux of the camera's own
-        // low-res track), so it stands in frame-for-frame — which is the only reason
-        // it's safe to hand Kdenlive as a proxy at all.
+        // The proxy reel built while you were reviewing, if it's still there. Built
+        // with no `-r`/`-vsync`, so it carries the master's frame count and rate
+        // exactly and stands in frame-for-frame — the only reason it's safe to hand
+        // Kdenlive as a proxy at all. It's also all-intra, so the timeline scrubs on
+        // it rather than walking a GOP per seek.
         let proxy = dir
             .join(".proxies")
             .join(format!("{}.mp4", crate::media::rel_stem(&s.master, &dir)));

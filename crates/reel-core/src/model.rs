@@ -757,8 +757,8 @@ pub struct Mark {
 /// One clip in a review playlist: the master (what marks key on and `cut` reads)
 /// and the file to load in the webview. Native `.LRF`/`.LRV` proxies carry extra
 /// video/data streams the `<video>` element chokes on, so they're never played
-/// raw — instead a clean single-stream mp4 is remuxed from them on demand and
-/// cached under `.proxies/`.
+/// raw — instead a clean single-stream mp4 is built from them on demand and cached
+/// under `.proxies/`.
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewClip {

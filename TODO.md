@@ -1293,3 +1293,81 @@ Kdenlive doesn't build its own. Kdenlive is pointed at reel's **remux**, never t
 raw `.LRF`. Coverage is partial by nature: only clips you actually reviewed have a
 proxy, and unreviewed masters play at full res.
 
+## Proxies are all-intra now
+
+Measured against the shipped Kdenlive default (`/usr/share/kdenlive/encodingprofiles.rc`)
+on a real `grad` clip — portrait 1080p HEVC master, 129 frames:
+
+| | build | size | keyframes |
+|---|---|---|---|
+| old remux | 0.21s | 5.4 MB | 5 / 129 |
+| **all-intra @ crf 23** | **0.86s** | **5.9 MB** | **129 / 129** |
+| Kdenlive's own, from the master | 2.25s | 7.2 MB | 129 / 129 |
+
+The remux was cheap because it never re-encoded — which is also why it couldn't fix
+the GOP. A camera's native proxy is long-GOP (one keyframe per ~26 frames here), so
+every seek walked forward from the last keyframe, in the two places that seek
+hardest: the marking scrubber and the Kdenlive timeline handed the same file.
+
+- Both paths now re-encode with `-g 1 -bf 0`. They differ only in scale (a native
+  proxy is already 720p; a master gets the 720-box filter) and CRF (23 vs 28 — the
+  native path re-encodes an already-lossy source, so it holds a tighter quality).
+- Free on the 209 no-LRF clips: that path already transcoded, this is two flags.
+- No `-r`, no `-vsync`. Frame count and rate must survive untouched or marks slide.
+- Size: **+23%** across the whole cache (4.8 → 5.9 GB over 62 clips). The single
+  clip above suggested it'd be near-neutral, which was the wrong read from one
+  sample — per clip it swings both ways (DOHA 31 → 25 MB, ha-giang 229 → 266 MB)
+  depending on how much motion the camera's own encoder was exploiting. On that
+  clip crf 20 was 7.8 MB and crf 26 was 4.4 MB; 23 is the knee.
+
+### Why not the other two options
+- **Kdenlive's external proxy.** It ships a `DJI LRF` pattern (`externalproxies.rc`)
+  that pairs `DJI_x.MP4` ↔ `DJI_x.LRF` natively, and MLT reads a raw LRF fine —
+  verified with `melt`, telemetry streams and all. Skipped because it covers 352 of
+  597 masters: the other 209 are friends' phone footage with no native proxy, so
+  reel's own path stays either way and you'd maintain both, split by camera brand.
+  It also wouldn't have improved seeking — the LRF is long-GOP whoever reads it.
+- **A fallback between the two.** Same objection, permanently: 41% coverage means
+  the fallback is the common case, not an edge.
+
+`a_proxy_is_all_intra_and_frame_for_frame` synthesises a `-g 30` master, asserts the
+source really was long-GOP, then that the proxy is 100% keyframes and identical in
+frame count (101 tests).
+
+### Refreshing a cache the recipe outgrew
+`build_proxy` returns early on a cache hit without looking inside the file, so a
+recipe change leaves everything already on disk built the old way — playable, and
+stale in a way nothing surfaces. Not versioned automatically: a marker plus a sweep
+races with the parallel `make_proxy` calls the UI fires during review.
+
+`make reproxy` (`examples/reproxy.rs`) is the answer instead. It rebuilds through
+`ensure_proxy` itself, so what lands is whatever `proxy.rs` builds today rather than
+a copy of the recipe that can drift from it, and it only refreshes what's *already*
+cached — it can't balloon to all 597 masters. A trip whose masters are all
+unreadable is skipped rather than treated as fully orphaned, since that's the
+archived or not-yet-mounted case and deleting there would be acting on a guess.
+
+Run against the real library: **62 rebuilt, 0 failed, 0 orphaned, 4.8 → 5.9 GB in
+532s.**
+
+### GPU encoding: measured, not worth it
+Both are available here (RTX 4050 + Arc 140V, NVENC/VAAPI/QSV all present in
+ffmpeg), so this got tested rather than assumed. Same 454-frame LRF:
+
+| | time | size | intra |
+|---|---|---|---|
+| **x264 crf23** | 2.39s | **27.4 MB** | 100% |
+| nvenc `-g 2` | 1.83s | 62.6 MB | **50%** |
+| vaapi qp28 | 1.90s | 50.8 MB | 100% |
+| vaapi qp34 | 1.77s | 29.8 MB | 100% |
+
+- **NVENC can't do all-intra at all**: `-g 1` is rejected outright — *"Gop Length
+  should be greater than number of B frames + 1"*. Its floor is `-g 2`, i.e. half
+  the frames, which is why Kdenlive's nvenc proxy profile says `-g 2` where its CPU
+  one says `-g 1`. At that floor it's still 2.3x the size.
+- **VAAPI works** and holds the frame count, but hardware I-frame compression is
+  weak: matching x264's size needs qp34, which is a real quality drop, for a 26%
+  wall-clock win. QSV won't initialise on this machine at all (`MFX session: -9`).
+- Frame count survived every encoder, so the invariant wasn't the disqualifier —
+  efficiency was. Staying on libx264: one path, no hardware detection, no fallback
+  that fires differently per machine.

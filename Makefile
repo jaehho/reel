@@ -25,6 +25,9 @@ errors: ## just the failures from this log, oldest first
 dump: ## print what the engine sees (trips + inserted card) as JSON
 	cargo run -p reel-core --example dump
 
+reproxy: ## rebuild already-cached proxies on the current recipe (see proxy.rs)
+	cargo run -p reel-core --release --example reproxy
+
 build: ## optimized release binary -> target/release/reel
 	cargo build -p reel-tauri --release
 
