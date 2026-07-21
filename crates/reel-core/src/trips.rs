@@ -162,9 +162,11 @@ fn derive_state(archived: bool, masters: usize, marks: usize, clips: usize) -> T
         // Trips archived before the marker existed. The old inference, kept as a
         // fallback so an existing library doesn't read as Empty overnight — but it
         // can't see an archive that was never cut, which is why the flag exists.
+        // This is the one place `clips` still decides anything: cutting is an
+        // export, not a stage, so having run it says nothing about how far along a
+        // trip is (see `TripState`). Marked outranks it and keeps outranking it.
         (0, _, c) if c > 0 => TripState::Archived,
         (0, _, _) => TripState::Empty,
-        (_, _, c) if c > 0 => TripState::Cut,
         (_, m, _) if m > 0 => TripState::Marked,
         _ => TripState::Imported,
     }

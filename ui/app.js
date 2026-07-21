@@ -512,7 +512,10 @@ function renderCard(card) {
 }
 
 // ---- render: trips ----
-const NEXT_LABEL = { review: "Review →", cut: "Cut →", edit: "Edit →", import: "Import →" };
+// No `cut` entry: cutting is an export you reach from the ✂ button, never the
+// step a trip is waiting on. Archived trips return early with Restore, so their
+// `next` never reaches here either.
+const NEXT_LABEL = { review: "Review →", edit: "Edit →", import: "Import →" };
 
 // "12 yours · 3 pulled from alice" — shown only when a trip mixes your footage
 // with clips pulled from the shared cloud; an all-yours trip needs no caption.
@@ -597,7 +600,7 @@ function footActions(t, card) {
   // (standalone files to hand someone), Edit is where the trip is going. So Edit is
   // the primary and the rightmost from the moment there are marks, and Cut sits to
   // its left in the same place whether it says "cut these" or "cut the new ones".
-  const marked = t.marks > 0 && (t.masters > 0 || t.clips > 0);
+  const marked = t.marks > 0 && t.masters > 0;
   if (marked) {
     const cut = elHTML("button", "btn small ghost", '<span class="btn-ico" aria-hidden="true">✂</span> Cut');
     cut.type = "button";
@@ -607,17 +610,17 @@ function footActions(t, card) {
     cut.onclick = () => startCut(t, card);
     actions.append(cut);
   }
-  const nextKey = marked && t.masters > 0 ? "edit" : t.next;
-  const next = el("button", "btn small primary", NEXT_LABEL[nextKey] ?? nextKey);
+  // `t.next` used to say "cut" for a marked trip, so this had to override it to
+  // reach Edit. The engine says "edit" now — cutting stopped being a stage there
+  // too — and the override is gone with it.
+  const next = el("button", "btn small primary", NEXT_LABEL[t.next] ?? t.next);
   next.type = "button";
   next.onclick =
-    nextKey === "review"
+    t.next === "review"
       ? () => openReview(t)
-      : nextKey === "cut"
-        ? () => startCut(t, card)
-        : nextKey === "edit"
-          ? () => openInEditor(t)
-          : () => toast(`"${nextKey}" for ${t.name} is coming in a later build.`);
+      : t.next === "edit"
+        ? () => openInEditor(t)
+        : () => toast(`"${t.next}" for ${t.name} is coming in a later build.`);
   actions.append(next);
   return [el("div", "trip-size tnum", fmtBytes(t.bytes)), actions];
 }
@@ -1011,7 +1014,7 @@ async function startCut(t, card) {
     const res = await invoke("cut_trip", { channel, trip: t.name });
     card.dataset.cutting = "";
     toast(cutSummary(res));
-    await load(); // re-render: the "cut" stat ticks up, state advances toward edit
+    await load(); // re-render: the "cut" stat ticks up (the state doesn't move)
   } catch (e) {
     card.dataset.cutting = "";
     foot.innerHTML = "";

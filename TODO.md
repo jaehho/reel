@@ -1225,3 +1225,31 @@ three different bars, and each one caught bugs the previous had passed.
 open and edit. So the conform rule holds in the GUI, not just in theory — but it was
 confirmed by a person opening the project, which remains the only way to test this
 layer.
+
+## Cut demoted from a stage to an export
+
+`TripState` had `Cut` ranked above `Marked`, from when cut clips were the only way
+into an editor. The timeline export ended that, and the state machine didn't notice:
+a trip you'd marked and edited still read `marked` and kept offering `Cut →` as the
+step it was waiting on, while a cut trip looked further along than an uncut one.
+
+The button-order fix last pass was a symptom — the UI reached past `t.next` with
+`marked && t.masters > 0 ? "edit" : t.next` to show the right primary. The model was
+what was wrong, so the workaround is gone with it.
+
+- `TripState::Cut` is deleted. States track review and stop there: Empty, Imported,
+  Marked, Archived. Cutting is an export, and an export doesn't advance anything —
+  `Marked` holds whether you've run it never, once, or five times. The clip count on
+  the card is where cutting shows up, which is all it ever needed.
+- `Marked.next()` is `edit`, not `cut`.
+- `Archived.next()` is `restore`, not `edit`. Editing an archived trip was already
+  described as a lie in `footActions`, which early-returns a Restore button over it;
+  the model now says the same thing rather than being overridden.
+- `clips` still decides one thing: the pre-flag archived fallback `(0, _, c > 0)`,
+  for trips archived before `archived=1` was written down. Marked outranks it.
+- Player help said "Cut turns every mark into its own file", the only destination a
+  mark was given. Both copies now lead with Edit and keep Cut as the other option.
+
+`cutting_does_not_advance_a_trip` pins it end to end: same state and same next step
+before and after clips appear, with the count as the only difference (102 tests).
+

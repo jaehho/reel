@@ -347,12 +347,41 @@ fn lists_trips_with_state() {
         "range start from the master's mtime"
     );
     assert_eq!(t.end, Some(1_700_000_000));
-    assert_eq!(t.state, TripState::Cut); // clips present → ready to edit
+    assert_eq!(t.state, TripState::Marked); // reviewed; the cut doesn't advance it
     assert_eq!(t.next, "edit");
     assert!(t.cover.is_some(), "a trip with masters has a cover clip");
     assert_eq!(t.mine, 1, "the lone master is yours");
     assert_eq!(t.pulled, 0);
     assert!(t.contributors.is_empty());
+}
+
+/// Cutting is an export, not a stage: a trip reads the same before and after, and
+/// the next step stays Edit either way. It used to flip Marked → Cut, so the card
+/// kept offering `Cut →` as the thing the trip was waiting on and a cut trip
+/// looked further along than an uncut one — neither of which is true now that
+/// marks open in an editor directly.
+#[test]
+fn cutting_does_not_advance_a_trip() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    let trip = make_trip(&lib, "koh-samui");
+    let c = cfg(&lib, &state, None);
+
+    touch(&trip.join("jaeho/dji/DJI_0001.MP4"), 1, 1000, 1_700_000_000);
+    fs::write(trip.join("marks.tsv"), "# header\nm1\ta\tb\n").unwrap();
+
+    let before = &list_trips(&c)[0];
+    assert_eq!(before.state, TripState::Marked);
+    assert_eq!(before.next, "edit");
+    assert_eq!(before.clips, 0);
+
+    touch(&trip.join("clips/DJI_0001_c01.mp4"), 1, 500, 1_700_000_000);
+
+    let after = &list_trips(&c)[0];
+    assert_eq!(after.state, TripState::Marked, "still just a reviewed trip");
+    assert_eq!(after.next, "edit");
+    assert_eq!(after.clips, 1, "the clip count is where cutting shows up");
 }
 
 #[test]

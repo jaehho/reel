@@ -2,19 +2,27 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Where a trip sits in the pipeline — drives the dashboard's next-step hint.
+/// How far a trip has got — drives the dashboard's next-step hint.
+///
+/// Reviewing is the only step that changes what a trip *is*: before it, the
+/// footage is undifferentiated; after it, the parts worth keeping are named. So
+/// the states track review, and stop there. Cutting used to sit at the end of
+/// this list, back when clips were the only way into an editor — but a trip's
+/// marks now open as a Kdenlive timeline directly, so cutting is one of two
+/// things you can do with a finished trip rather than a step on the way to
+/// them. It's an export, and an export doesn't advance anything: the clip count
+/// is on the card either way, and `Marked` stays true whether you've run it once,
+/// five times, or never.
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum TripState {
-    /// No local footage and nothing cut yet.
+    /// No local footage.
     Empty,
     /// Footage imported, not reviewed.
     Imported,
-    /// Has marks but no cut clips yet.
+    /// Reviewed: has marks, ready to edit or cut.
     Marked,
-    /// Has cut clips, ready to edit.
-    Cut,
-    /// Raw freed locally (kept in cloud); clips remain.
+    /// Raw freed locally, kept in the cloud.
     Archived,
 }
 
@@ -24,9 +32,10 @@ impl TripState {
         match self {
             TripState::Empty => "import",
             TripState::Imported => "review",
-            TripState::Marked => "cut",
-            TripState::Cut => "edit",
-            TripState::Archived => "edit",
+            TripState::Marked => "edit",
+            // Nothing here to work on until the raw is back, and every other
+            // action on an archived trip is a lie (see `footActions`).
+            TripState::Archived => "restore",
         }
     }
 }
