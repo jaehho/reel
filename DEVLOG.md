@@ -1,4 +1,6 @@
-# TODO
+# reel devlog
+
+Design notes and investigations, in the order they happened. Open work lives in GitHub issues; the "still open" and "not done" notes below record when each item was found.
 
 ## Phase 7 — Sync (live pool reconcile)
 
