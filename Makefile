@@ -2,7 +2,7 @@
 # The frontend is static and embedded at compile time, so `cargo run` is all you
 # need to launch the app; npm/tauri-cli only come in for release bundling.
 
-.PHONY: run test build fmt clean dump logs errors
+.PHONY: run test build fmt clean dump logs errors perf
 
 REEL_LOG := $(or $(XDG_STATE_HOME),$(HOME)/.local/state)/reel/log/reel.jsonl
 
@@ -21,6 +21,10 @@ logs: ## follow the app log (UI + engine, newest last)
 errors: ## just the failures from this log, oldest first
 	@grep -h '"lvl":"\(warn\|error\)"' $(REEL_LOG)* 2>/dev/null | sort | grep . \
 		|| echo "no warnings or errors logged"
+
+perf: ## slow work (100 ms or more) from this log, oldest first
+	@grep -h '"src":"perf"' $(REEL_LOG)* 2>/dev/null | sort | grep . \
+		|| echo "nothing slow logged"
 
 dump: ## print what the engine sees (trips + inserted card) as JSON
 	cargo run -p reel-core --example dump

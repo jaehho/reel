@@ -29,6 +29,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 /// Rotate once the live file passes this. Two generations, so the log costs at
 /// most ~4 MiB — big enough to hold a long session, small enough to paste.
@@ -100,6 +101,38 @@ pub fn warn(src: &str, msg: &str) {
 }
 pub fn error(src: &str, msg: &str) {
     event(Level::Error, src, msg, None);
+}
+
+/// Work that finishes faster than this stays out of the log; anything slower
+/// gets a `perf` line, so reading the log shows where the time goes without a
+/// line for every poster and refresh.
+const SLOW_MS: u128 = 100;
+
+/// Run `f`, and log `what` with its wall time if it took [`SLOW_MS`] or more.
+/// The result passes through untouched.
+pub fn timed<T>(what: &str, f: impl FnOnce() -> T) -> T {
+    let start = Instant::now();
+    let out = f();
+    let ms = start.elapsed().as_millis();
+    if let Some(line) = slow_record(now_epoch(), what, ms) {
+        if let Some(dir) = LOG_DIR.get() {
+            append(dir, &line);
+        }
+    }
+    out
+}
+
+fn slow_record(ts: i64, what: &str, ms: u128) -> Option<String> {
+    (ms >= SLOW_MS).then(|| {
+        let msg = format!("{what} took {ms} ms");
+        record(
+            ts,
+            Level::Info,
+            "perf",
+            &msg,
+            Some(json!({ "ms": ms as u64 })),
+        )
+    })
 }
 
 /// One JSONL line. Built through `serde_json` rather than `format!` so a message
@@ -190,6 +223,16 @@ mod tests {
         assert_eq!(v["msg"], "boom \"quoted\"\nand a second line");
         assert_eq!(v["ctx"]["trip"], "ha-giang");
         assert_eq!(v["at"], "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn only_slow_work_gets_a_perf_line() {
+        assert!(slow_record(0, "list_trips", SLOW_MS - 1).is_none());
+        let line = slow_record(0, "scan_card", 1840).expect("slow work is logged");
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["src"], "perf");
+        assert_eq!(v["msg"], "scan_card took 1840 ms");
+        assert_eq!(v["ctx"]["ms"], 1840);
     }
 
     #[test]

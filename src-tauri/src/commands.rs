@@ -29,7 +29,11 @@ pub fn clip_base(base: tauri::State<'_, ClipBase>) -> String {
 #[tauri::command]
 pub async fn list_trips() -> Vec<Trip> {
     let cfg = Config::from_env();
-    match tauri::async_runtime::spawn_blocking(move || reel_core::list_trips(&cfg)).await {
+    match tauri::async_runtime::spawn_blocking(move || {
+        reel_core::log::timed("list_trips", || reel_core::list_trips(&cfg))
+    })
+    .await
+    {
         Ok(t) => t,
         Err(join) => {
             // Was a bare `unwrap_or_default()`: a panicking walk rendered as an
@@ -46,7 +50,11 @@ pub async fn list_trips() -> Vec<Trip> {
 #[tauri::command]
 pub async fn scan_card() -> Option<CardInfo> {
     let cfg = Config::from_env();
-    match tauri::async_runtime::spawn_blocking(move || reel_core::scan_card(&cfg)).await {
+    match tauri::async_runtime::spawn_blocking(move || {
+        reel_core::log::timed("scan_card", || reel_core::scan_card(&cfg))
+    })
+    .await
+    {
         Ok(c) => c,
         Err(join) => {
             // Same trap as list_trips: `.ok().flatten()` made a panicked scan
@@ -69,7 +77,10 @@ pub async fn scan_card() -> Option<CardInfo> {
 pub async fn thumb(path: String, fileid: String) -> Option<String> {
     let cfg = Config::from_env();
     tauri::async_runtime::spawn_blocking(move || {
-        reel_core::thumbs::poster_data_uri(&cfg, Path::new(&path), &fileid)
+        let what = format!("thumb {path}");
+        reel_core::log::timed(&what, || {
+            reel_core::thumbs::poster_data_uri(&cfg, Path::new(&path), &fileid)
+        })
     })
     .await
     .ok()
@@ -88,8 +99,11 @@ pub async fn import_session(
 ) -> Result<ImportResult, String> {
     let cfg = Config::from_env();
     match tauri::async_runtime::spawn_blocking(move || {
-        reel_core::import_window(&cfg, &trip, start, end, |p| {
-            let _ = channel.send(p);
+        let what = format!("import_session {trip}");
+        reel_core::log::timed(&what, || {
+            reel_core::import_window(&cfg, &trip, start, end, |p| {
+                let _ = channel.send(p);
+            })
         })
     })
     .await
@@ -253,7 +267,10 @@ pub async fn card_playlist(start: Option<i64>, end: Option<i64>) -> Result<Playl
 pub async fn make_card_proxy(master: String) -> Result<String, String> {
     let cfg = Config::from_env();
     match tauri::async_runtime::spawn_blocking(move || {
-        reel_core::ensure_card_proxy(&cfg, Path::new(&master))
+        let what = format!("make_card_proxy {master}");
+        reel_core::log::timed(&what, || {
+            reel_core::ensure_card_proxy(&cfg, Path::new(&master))
+        })
     })
     .await
     {
@@ -269,7 +286,10 @@ pub async fn make_card_proxy(master: String) -> Result<String, String> {
 pub async fn make_proxy(trip: String, master: String) -> Result<String, String> {
     let cfg = Config::from_env();
     match tauri::async_runtime::spawn_blocking(move || {
-        reel_core::ensure_proxy(&cfg, &trip, Path::new(&master))
+        let what = format!("make_proxy {master}");
+        reel_core::log::timed(&what, || {
+            reel_core::ensure_proxy(&cfg, &trip, Path::new(&master))
+        })
     })
     .await
     {
