@@ -1,8 +1,9 @@
 //! SD card discovery and the session survey (`scan`).
 
 use crate::config::Config;
+use crate::idcache::IdCache;
 use crate::ledger::{Ledger, Tombstones};
-use crate::media::{captured_at, fileid_of, has_ext, is_photo};
+use crate::media::{captured_at, has_ext, is_photo};
 use crate::model::{CardInfo, ClipRef};
 use crate::sessions::{cluster_sessions, ClipRec};
 use std::fs;
@@ -103,12 +104,14 @@ pub fn scan_card(cfg: &Config) -> Option<CardInfo> {
     let captures = card_masters(&roots);
     let ledger = Ledger::load(&cfg.ledger_path());
     let tombs = Tombstones::load(&cfg.tombstones_path());
+    // Card files don't change between scans, so their ids are read once.
+    let mut ids = IdCache::load(cfg);
 
     let recs: Vec<ClipRec> = captures
         .iter()
         .map(|(ep, p)| {
             let bytes = fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-            let id = fileid_of(p).ok();
+            let id = ids.fileid(p).ok();
             // A tombstoned capture is trash the user already deleted: no owner, so
             // it reads "discarded" rather than "new" or "imported in <trip>".
             let discarded = id.as_deref().map(|i| tombs.contains(i)).unwrap_or(false);
@@ -130,6 +133,7 @@ pub fn scan_card(cfg: &Config) -> Option<CardInfo> {
             }
         })
         .collect();
+    ids.save();
 
     let mut sessions = cluster_sessions(&recs, cfg.session_gap);
 

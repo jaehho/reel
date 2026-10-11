@@ -12,6 +12,7 @@ pub mod config;
 pub mod cut;
 pub mod dedup;
 pub mod edit;
+pub mod idcache;
 pub mod import;
 pub mod ledger;
 pub mod log;
