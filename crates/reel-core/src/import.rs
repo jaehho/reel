@@ -9,6 +9,7 @@
 
 use crate::cards::card_roots;
 use crate::config::Config;
+use crate::idcache::IdCache;
 use crate::ledger::{Ledger, LedgerRow, Tombstones};
 use crate::media::{fileid_of, is_photo, kind_of, masters_under};
 use crate::model::{ImportProgress, ImportResult};
@@ -146,6 +147,9 @@ pub fn import_window(
 
     let mut ledger = Ledger::load(&cfg.ledger_path());
     let tombs = Tombstones::load(&cfg.tombstones_path());
+    // The card scan just read these ids; unchanged files are not hashed again.
+    // The destination check below still hashes directly.
+    let mut ids = IdCache::load(cfg);
     // Rows to record. Collected and merged in once at the end: the copy loop below
     // moves gigabytes, and holding the ledger across it would let our stale copy
     // overwrite a delete's tombstoning that landed in the meantime. The local
@@ -162,7 +166,7 @@ pub fn import_window(
         if at < w0 || at > w1 {
             continue;
         }
-        let fileid = match fileid_of(&p) {
+        let fileid = match ids.fileid(&p) {
             Ok(id) => id,
             Err(_) => continue, // unreadable on the card; leave it
         };
@@ -209,6 +213,8 @@ pub fn import_window(
             at,
         });
     }
+
+    ids.save();
 
     let grand_total: u64 = jobs.iter().map(|j| j.bytes).sum();
     let file_count = jobs.len();
