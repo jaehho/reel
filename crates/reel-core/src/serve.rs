@@ -1,9 +1,11 @@
 //! A tiny static file server for clips, behind the loopback HTTP server.
 //!
 //! Pure and dependency-free so it's unit-tested headlessly: it scope-guards every
-//! request to the library, honours a single HTTP `Range` (what a `<video>`
-//! element sends to seek), and caps each response to 1 MiB so memory stays
-//! bounded no matter how large the master. The conventions mirror Tauri's own
+//! request to the library and honours a single HTTP `Range` (what a `<video>`
+//! element sends to seek). Memory stays bounded because the body is *streamed*
+//! from disk (`serve_clip` hands back a bounded reader, never a buffer), not
+//! because of a response-size cap — there is none, so a seek can ask for any
+//! window of an arbitrarily large master. The conventions mirror Tauri's own
 //! asset protocol (206 partial content, `Content-Range`, `bytes */len` on an
 //! unsatisfiable range). The Tauri layer (`clip_server`) serves these over
 //! `http://127.0.0.1` because WebKitGTK can't play a custom URI scheme.

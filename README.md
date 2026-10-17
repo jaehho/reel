@@ -7,7 +7,7 @@ during the port.
 
 ## Install
 
-Arch (AUR) — also pulled in by the dotfiles `make sync`:
+Arch (AUR) — also pulled in by `dotfiles sync`:
 
 ```sh
 paru -S reel-git
@@ -86,7 +86,7 @@ The engine honours the same env knobs as the script (`REEL_LIB`, `REEL_REMOTE`,
   paths, and archive re-verifies before freeing the only local copies.
 - [x] **5 — Packaging**: `reel-git` on the AUR (plain `cargo build` — the frontend
   embeds, so no tauri-cli/npm), a `.desktop` launcher + icons, and a
-  `packages/arch.txt` entry so the dotfiles `make sync` installs it. Recipe and
+  `packages/arch/97-apps.txt` entry so `dotfiles sync` installs it. Recipe and
   publish/update flow in `packaging/`.
 - [x] **6 — Organize**: fix footage in the wrong trip and clear what you don't
   want, without breaking the dedup ledger or the cloud. **Move** clips between
@@ -159,4 +159,4 @@ local copy, with a warning.
 Import, Review, Cut, Edit, Share, card reclaim, and archive match the `reel`
 script; reorganize (move/rename/merge), permanent delete, pull-from-cloud,
 card preview, and mixed photo/video import go beyond it. Packaged on the AUR as
-`reel-git` and installed by the dotfiles `make sync`.
+`reel-git` and installed by `dotfiles sync`.

@@ -55,13 +55,13 @@ makepkg --printsrcinfo > .SRCINFO   # in this dir, then copy both to the AUR clo
 
 ## Wire into dotfiles
 
-Once `reel-git` is on the AUR, add one line to `dotfiles/packages/arch.txt`:
+Once `reel-git` is on the AUR, add one line to `dotfiles/packages/arch/97-apps.txt`:
 
 ```
 reel-git
 ```
 
-`make sync` installs it via paru like every other package — no submodule, no
+`dotfiles sync` installs it via paru like every other package — no submodule, no
 special-casing.
 
 ## Known warnings
