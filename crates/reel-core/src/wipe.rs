@@ -9,7 +9,7 @@
 //! the cloud stays put. Losing the only copy of footage is unrecoverable, so the
 //! cloud check aborts the whole reclaim on the first miss.
 
-use crate::cards::{card_panoramas, card_roots};
+use crate::cards::{card_panoramas, card_roots, RawPano};
 use crate::config::Config;
 use crate::ledger::Ledger;
 use crate::media::{fileid_of, is_photo, masters_under};
@@ -161,14 +161,23 @@ pub fn plan_reclaim(
     // ordinary photo beside the videos — we imported the photo, so the frames would
     // otherwise linger. They ride the photo's fate: swept only once that photo is
     // itself cleared-safe (in `ok`, so it passed import + local + the cloud gate).
-    let safe_seqs: BTreeSet<String> = ok
+    //
+    // The pairing is checked against *every* photo on the card, not just the ones
+    // being cleared: the 4-digit seq is a per-camera counter, so it recurs (another
+    // card, an ordinary photo numbered the same), and a cleared photo must not vouch
+    // for some other capture's frames.
+    let safe_photos: BTreeSet<&Path> = ok
         .iter()
-        .filter(|(p, _)| is_photo(p))
-        .filter_map(|(p, _)| p.file_name().and_then(|s| s.to_str()).and_then(seq_num))
+        .map(|(p, _)| p.as_path())
+        .filter(|p| is_photo(p))
         .collect();
-    if !safe_seqs.is_empty() {
+    if !safe_photos.is_empty() {
+        let card_photos: Vec<(i64, PathBuf)> = masters_under(&roots)
+            .into_iter()
+            .filter(|(_, p)| is_photo(p))
+            .collect();
         for raw in card_panoramas(&roots) {
-            if seq_num(&raw.seq).is_some_and(|s| safe_seqs.contains(&s)) {
+            if pano_cleared(&raw, &card_photos, &safe_photos) {
                 for photo in raw.photos {
                     bytes += fs::metadata(&photo).map(|m| m.len()).unwrap_or(0);
                     files.push(photo.display().to_string());
@@ -196,6 +205,32 @@ fn seq_num(name: &str) -> Option<String> {
     name.split('_')
         .rfind(|c| c.len() == 4 && c.bytes().all(|b| b.is_ascii_digit()))
         .map(str::to_string)
+}
+
+/// How far apart (seconds) a stitched photo and its source frames can be captured
+/// and still be one panorama. The stitch lands within moments of the last frame.
+const PANO_SLOP_SECS: i64 = 900;
+
+/// Is this panorama's raw-frame folder safe to sweep? Its candidates are the card
+/// photos carrying the same `seq` *and* captured close in time; the frames go only
+/// when there is at least one and every one of them is cleared. A seq with no
+/// close photo (never stitched, or stitched elsewhere) and a seq shared with a
+/// photo that isn't being cleared both keep the frames.
+fn pano_cleared(raw: &RawPano, card_photos: &[(i64, PathBuf)], safe: &BTreeSet<&Path>) -> bool {
+    let Some(seq) = seq_num(&raw.seq) else {
+        return false;
+    };
+    let mut near = card_photos
+        .iter()
+        .filter(|(at, p)| {
+            (at - raw.at).abs() <= PANO_SLOP_SECS
+                && p.file_name()
+                    .and_then(|s| s.to_str())
+                    .and_then(seq_num)
+                    .is_some_and(|s| s == seq)
+        })
+        .peekable();
+    near.peek().is_some() && near.all(|(_, p)| safe.contains(p.as_path()))
 }
 
 /// True if `p` resolves to a location inside `root` (symlinks resolved), so a

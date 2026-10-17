@@ -265,6 +265,69 @@ fn source_frames_stay_until_their_stitched_photo_is_safe() {
 }
 
 #[test]
+fn a_cleared_panorama_cannot_vouch_for_another_with_the_same_seq() {
+    // The 4-digit seq is a per-camera counter, so two different panoramas can
+    // carry the same one. Clearing the first (imported) must not sweep the second's
+    // source frames: its stitched photo was never imported.
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    let dcim = d.path().join("card/DCIM");
+    fs::create_dir_all(&state).unwrap();
+
+    let (a, b) = (1_700_000_100, 1_700_900_000);
+    touch(
+        &dcim.join("DJI_001/DJI_20260101_0039_D.JPG"),
+        2,
+        6_000_000,
+        a,
+    );
+    touch(
+        &dcim.join("PANORAMA/001_0039/PANO_0001.JPG"),
+        3,
+        5_000_000,
+        a - 10,
+    );
+    touch(
+        &dcim.join("DJI_001/DJI_20260102_0039_D.JPG"),
+        4,
+        6_000_000,
+        b,
+    );
+    touch(
+        &dcim.join("PANORAMA/002_0039/PANO_0001.JPG"),
+        5,
+        5_000_000,
+        b - 10,
+    );
+
+    let c = cfg(&lib, &state, Some(dcim.clone()));
+    // Import only the first panorama.
+    reel_core::import_window(&c, "kyoto", a, a, |_| {}).unwrap();
+
+    let plan = reel_core::plan_reclaim(&c, Some((a, a)), true, |_| {}).unwrap();
+    let pano: Vec<_> = plan
+        .files
+        .iter()
+        .filter(|f| f.contains("PANORAMA"))
+        .collect();
+    assert_eq!(
+        pano.len(),
+        1,
+        "only the cleared panorama's frames: {pano:?}"
+    );
+    assert!(pano[0].contains("001_0039"));
+
+    // Once both stitched photos are imported and cleared, both folders go.
+    reel_core::import_window(&c, "kyoto", b, b, |_| {}).unwrap();
+    let plan = reel_core::plan_reclaim(&c, None, true, |_| {}).unwrap();
+    assert_eq!(
+        plan.files.iter().filter(|f| f.contains("PANORAMA")).count(),
+        2
+    );
+}
+
+#[test]
 fn ledger_round_trips() {
     let d = tempfile::tempdir().unwrap();
     let p = d.path().join("imported.tsv");
