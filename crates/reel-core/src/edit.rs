@@ -48,7 +48,7 @@ pub fn open_in_editor(cfg: &Config, trip: &str) -> Result<TimelineResult, String
         return Err(format!("no such trip: {trip}"));
     }
     if !on_path(EDITOR) {
-        return Err(format!("{EDITOR} isn't installed — run 'dotfiles sync'"));
+        return Err(format!("{EDITOR} isn't installed — install it with pacman"));
     }
     let t = crate::timeline::build_timeline(cfg, trip)?;
     launch(&[PathBuf::from(&t.path)])?;

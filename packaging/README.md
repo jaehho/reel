@@ -61,7 +61,7 @@ Once `reel-git` is on the AUR, add one line to `dotfiles/packages/arch/97-apps.t
 reel-git
 ```
 
-`dotfiles sync` installs it via paru like every other package — no submodule, no
+Install it with `paru -S reel-git` like any other AUR package — no submodule, no
 special-casing.
 
 ## Known warnings
