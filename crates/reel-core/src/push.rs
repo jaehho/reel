@@ -60,7 +60,8 @@ pub fn push_trip(
         return Err(format!("nothing of yours to share in '{trip}'"));
     }
     rclone::remote_ok(&cfg.remote)?;
-    let dest = format!("{}/{}/{}", cfg.remote.trim_end_matches('/'), trip, cfg.user);
+    let me = cfg.user_scope()?;
+    let dest = format!("{}/{}/{}", cfg.remote.trim_end_matches('/'), trip, me);
 
     // ---- upload (resumable: rclone skips files already in the cloud) ----
     let mut uploaded = 0u64;

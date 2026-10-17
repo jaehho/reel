@@ -299,7 +299,10 @@ pub fn delete_trip(cfg: &Config, trip: &str) -> Result<DeleteResult, String> {
     let mut cloud_ok = true;
     if shared {
         if rclone::remote_ok(&cfg.remote).is_ok() {
-            let path = format!("{}/{}/{}", cfg.remote.trim_end_matches('/'), trip, cfg.user);
+            // `purge` is recursive: an unusable user would scope it to the whole
+            // trip and take every contributor's footage.
+            let me = cfg.user_scope()?;
+            let path = format!("{}/{}/{}", cfg.remote.trim_end_matches('/'), trip, me);
             if rclone::purge(&path).unwrap_or(false) {
                 in_cloud = masters;
             } else {

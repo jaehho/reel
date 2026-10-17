@@ -31,12 +31,20 @@ fn home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/root"))
 }
 
+/// A set-but-empty env var (`REEL_USER=` in a unit file, or `REEL_USER=$UNSET`
+/// in a wrapper) reads as `Ok("")`, not `Err` — so `or_else` never fires and the
+/// empty string wins. Every cloud op scopes itself to `<remote>/<trip>/<user>`,
+/// which an empty user collapses to the whole trip, so treat blank as absent.
+fn non_empty(k: &str) -> Option<String> {
+    env::var(k).ok().filter(|v| !v.trim().is_empty())
+}
+
 impl Config {
     pub fn from_env() -> Self {
-        let user = env::var("REEL_USER")
-            .or_else(|_| env::var("USER"))
-            .unwrap_or_else(|_| "user".into());
-        let lib = env::var_os("REEL_LIB")
+        let user = non_empty("REEL_USER")
+            .or_else(|| non_empty("USER"))
+            .unwrap_or_else(|| "user".into());
+        let lib = non_empty("REEL_LIB")
             .map(PathBuf::from)
             .unwrap_or_else(|| home().join("Videos"));
         let state_dir = env::var_os("XDG_STATE_HOME")
@@ -49,8 +57,10 @@ impl Config {
             .join("reel");
         Config {
             lib,
-            remote: env::var("REEL_REMOTE").unwrap_or_else(|_| "nextcloud:Reels".into()),
-            media_user: env::var("USER").unwrap_or_else(|_| user.clone()),
+            // Blank here would make every cloud path `/{trip}/{user}` — an
+            // absolute *local* path rclone would happily operate on.
+            remote: non_empty("REEL_REMOTE").unwrap_or_else(|| "nextcloud:Reels".into()),
+            media_user: non_empty("USER").unwrap_or_else(|| user.clone()),
             user,
             state_dir,
             cache_dir,
@@ -65,6 +75,24 @@ impl Config {
 
     pub fn ledger_path(&self) -> PathBuf {
         self.state_dir.join("imported.tsv")
+    }
+
+    /// Your folder name, checked before it's spliced into a cloud path. Every
+    /// cloud op is scoped to `<remote>/<trip>/<you>` precisely so it can never
+    /// touch another contributor's footage; an empty or `/`-bearing user collapses
+    /// that scope to the whole trip, which turns `delete_trip`'s purge into one
+    /// that takes everyone's footage. `from_env` won't produce one, but a Config
+    /// assembled any other way can, so the guard lives at the point of use.
+    pub fn user_scope(&self) -> Result<&str, String> {
+        let u = self.user.as_str();
+        if u.is_empty() || u.contains(['/', '\\']) || u == "." || u == ".." {
+            return Err(format!(
+                "{u:?} isn't a usable folder name for your footage — set REEL_USER. \
+                 Cloud operations are scoped to <trip>/<you>, and this would widen \
+                 them to the whole trip."
+            ));
+        }
+        Ok(u)
     }
 
     /// Filesystem roots the loopback clip server is allowed to stream from: the
