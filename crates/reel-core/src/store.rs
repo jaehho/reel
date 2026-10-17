@@ -50,6 +50,51 @@ pub(crate) fn temp_sibling(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// Marks a work-in-progress file. Shared so [`sweep_stale_partials`] can find them.
+pub(crate) const PARTIAL_TAG: &str = ".partial.";
+
+/// Like [`temp_sibling`], but keeping `path`'s extension: ffmpeg infers its output
+/// container from the filename, so a `.tmp` suffix makes it refuse to write at all.
+/// Same purpose otherwise — unique per process and call, so two writers racing on
+/// one output never share a scratch file.
+pub(crate) fn temp_sibling_keep_ext(path: &Path) -> PathBuf {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("tmp");
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+    path.with_file_name(format!(
+        "{stem}.{}.{n}{PARTIAL_TAG}{ext}",
+        std::process::id()
+    ))
+}
+
+/// Delete abandoned scratch files in `dir` — a build killed mid-encode leaves one,
+/// and nothing else ever removes them. They're invisible to `masters_in` (wrong
+/// extension) but counted by the trip's size, so they quietly inflate what the
+/// dashboard reports. Only files older than an hour are touched, which is far
+/// beyond any encode here and keeps this from racing a live writer.
+pub(crate) fn sweep_stale_partials(dir: &Path) {
+    const STALE_SECS: u64 = 3600;
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for e in rd.filter_map(|e| e.ok()) {
+        let p = e.path();
+        if !p.file_name().and_then(|s| s.to_str()).is_some_and(|n| {
+            n.contains(PARTIAL_TAG) || n.ends_with(".partial.mp4") || n.ends_with(".partial.jpg")
+        }) {
+            continue;
+        }
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| SystemTime::now().duration_since(t).ok())
+            .is_some_and(|age| age.as_secs() > STALE_SECS);
+        if old {
+            let _ = fs::remove_file(&p);
+        }
+    }
+}
+
 /// Wall-clock epoch seconds, for stamping queued ops (informational ordering).
 pub fn now_epoch() -> i64 {
     SystemTime::now()

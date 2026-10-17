@@ -119,7 +119,9 @@ pub fn grab_still(cfg: &Config, master: &Path, t: f64) -> Result<StillResult, St
 /// One decoded frame → JPEG, written to a temp sibling and renamed so a failed or
 /// interrupted run can't leave a half-written picture in the library.
 fn write_frame(master: &Path, t: f64, out: &Path) -> Result<(), String> {
-    let tmp = out.with_extension("partial.jpg");
+    // Unique per call: a name derived only from the output is shared by two
+    // concurrent writers, and each one's first act is to overwrite it.
+    let tmp = crate::store::temp_sibling_keep_ext(out);
     let o = Command::new("ffmpeg")
         .args(FF_BASE)
         // Seeking *before* `-i` is both fast and exact here. The keyframe caveat in

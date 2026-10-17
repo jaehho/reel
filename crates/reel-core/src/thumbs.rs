@@ -36,7 +36,15 @@ pub fn ensure_poster(cfg: &Config, clip: &Path, fileid: &str) -> Option<PathBuf>
     } else {
         &[Some("1"), Some("0")]
     };
+    // Written through a unique temp sibling, like every other media writer here.
+    // Straight-to-cache was the one exception, and the validity gate is only
+    // "non-empty": a run interrupted mid-write (quit, suspend, crash) left a
+    // truncated JPEG that the early return above then served forever, since the
+    // cache key is a content id that never changes. Two concurrent `thumb` calls
+    // for one fileid — the UI runs three at a time plus an unqueued fourth from the
+    // player — could also interleave on a single output path.
     for seek in attempts {
+        let tmp = crate::store::temp_sibling_keep_ext(&out);
         let mut cmd = Command::new("ffmpeg");
         cmd.args(["-y", "-loglevel", "error"]);
         if let Some(s) = seek {
@@ -55,15 +63,16 @@ pub fn ensure_poster(cfg: &Config, clip: &Path, fileid: &str) -> Option<PathBuf>
                 "-q:v",
                 "3",
             ])
-            .arg(&out)
+            .arg(&tmp)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
-        if ok && nonempty_file(&out) {
+        if ok && nonempty_file(&tmp) && std::fs::rename(&tmp, &out).is_ok() {
             return Some(out);
         }
+        let _ = std::fs::remove_file(&tmp);
     }
     None
 }

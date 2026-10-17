@@ -92,8 +92,18 @@ fn build_proxy(master: &Path, out: &Path) -> Result<PathBuf, String> {
     }
 
     // Temp sibling → an interrupted build never leaves a half proxy that looks done.
-    let tmp = out.with_extension("partial.mp4");
-    let _ = std::fs::remove_file(&tmp);
+    // Unique per process and call: a fixed `.partial.mp4` is derived purely from
+    // the output path, so two builders of the same proxy (the UI fires parallel
+    // `make_proxy` calls during review, and `make reproxy` calls `ensure_proxy` on
+    // the same masters) shared one temp and each began by deleting the other's
+    // in-progress file. Whoever renamed first published whatever bytes happened to
+    // be in that inode — and `build_proxy` returns early on any existing output, so
+    // the corrupt result stayed cached and was handed to Kdenlive as a
+    // frame-for-frame stand-in for the master.
+    if let Some(parent) = out.parent() {
+        crate::store::sweep_stale_partials(parent);
+    }
+    let tmp = crate::store::temp_sibling_keep_ext(out);
 
     let mut cmd = Command::new("ffmpeg");
     cmd.args(FF_BASE).arg(source);
