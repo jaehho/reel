@@ -36,6 +36,15 @@ fn verify_in_cloud(
     rels: &[String],
     on: &mut impl FnMut(WipeProgress),
 ) -> Result<(), String> {
+    // `trip` here is a ledger `row.trip`, read from a TSV shared with the legacy
+    // script and never validated on the way in. Unlike every other entry point in
+    // these modules it isn't guarded, yet it lands in a `.wipe-check-{trip}.lst`
+    // filename and in `lib`/`remote` paths — so a crafted `../../x` would escape the
+    // state dir and misdirect the check. Refuse it; a reclaim that can't prove a
+    // backup deletes nothing.
+    if trip.is_empty() || trip.contains(['/', '\\']) || trip == "." || trip == ".." {
+        return Err(format!("ledger has a bad trip name: {trip:?}"));
+    }
     rclone::remote_ok(&cfg.remote)?;
     fs::create_dir_all(&cfg.state_dir).ok();
     let list = cfg.state_dir.join(format!(".wipe-check-{trip}.lst"));
@@ -198,6 +207,22 @@ fn seq_num(name: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// A raw panorama source frame — anything under a `PANORAMA/` component. The
+/// ledger never holds these (reel imports the stitched photo, not the frames), so
+/// the commit-time identity check has to reach them by their sequence instead.
+fn is_pano_frame(p: &Path) -> bool {
+    p.components()
+        .any(|c| c.as_os_str().to_str() == Some("PANORAMA"))
+}
+
+/// The sequence a source frame belongs to, from its `PANORAMA/<seq>/` folder.
+fn seq_of_pano_frame(p: &Path) -> Option<String> {
+    p.parent()
+        .and_then(|d| d.file_name())
+        .and_then(|s| s.to_str())
+        .and_then(seq_num)
+}
+
 /// True if `p` resolves to a location inside `root` (symlinks resolved), so a
 /// delete can't escape the card.
 fn under(p: &Path, root: &Path) -> bool {
@@ -218,10 +243,49 @@ pub fn commit_reclaim(cfg: &Config, files: &[String]) -> Result<ReclaimResult, S
     let mut deleted = 0usize;
     let mut bytes = 0u64;
     let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
+
+    // Re-establish *identity*, not just location. Plan and commit are two separate
+    // user-driven calls with a confirm dialog between them, and a card mount path
+    // (`/run/media/<user>/GOPRO/DCIM/100GOPRO/…`) is stable across cards from the
+    // same camera — so swapping cards at the dialog would otherwise delete
+    // never-imported footage off the new one. `clear_discarded` already re-derives
+    // the content id before each delete; this is the same rule, against the ledger.
+    let ledger = Ledger::load(&cfg.ledger_path());
+    let verified = |p: &Path| -> bool {
+        let Ok(fid) = fileid_of(p) else { return false };
+        let Some(row) = ledger.row_of(&fid) else {
+            return false;
+        };
+        let localf = cfg
+            .lib
+            .join(&row.trip)
+            .join(&row.person)
+            .join(&row.camera)
+            .join(&row.base);
+        fs::metadata(&localf).map(|m| m.len()).ok() == fs::metadata(p).map(|m| m.len()).ok()
+    };
+    // Panorama source frames are raw stock the ledger never holds — they ride their
+    // stitched photo's fate, so re-derive which sequences are still safe from the
+    // photos that just passed above, exactly as `plan_reclaim` does.
+    let safe_seqs: BTreeSet<String> = files
+        .iter()
+        .map(PathBuf::from)
+        .filter(|p| !is_pano_frame(p) && is_photo(p) && verified(p))
+        .filter_map(|p| p.file_name().and_then(|s| s.to_str()).and_then(seq_num))
+        .collect();
+
     for f in files {
         let p = Path::new(f);
         if !roots.iter().any(|r| under(p, r)) {
             continue; // never delete anything that isn't on the card
+        }
+        let safe = if is_pano_frame(p) {
+            seq_of_pano_frame(p).is_some_and(|s| safe_seqs.contains(&s))
+        } else {
+            verified(p)
+        };
+        if !safe {
+            continue; // not the file that was planned — a different card, or changed
         }
         let size = fs::metadata(p).map(|m| m.len()).unwrap_or(0);
         if fs::remove_file(p).is_ok() {
@@ -245,5 +309,11 @@ pub fn commit_reclaim(cfg: &Config, files: &[String]) -> Result<ReclaimResult, S
             }
         }
     }
+    crate::log::event(
+        crate::log::Level::Info,
+        "engine",
+        "reclaim",
+        Some(serde_json::json!({ "deleted": deleted, "bytes": bytes })),
+    );
     Ok(ReclaimResult { deleted, bytes })
 }

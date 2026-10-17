@@ -1098,8 +1098,20 @@ fn commit_reclaim_only_deletes_card_files() {
     fs::create_dir_all(&state).unwrap();
 
     let c = cfg(&lib, &state, Some(dcim.clone()));
+    seed_imported(
+        &c,
+        &dcim,
+        None,
+        "bali",
+        "dji",
+        "DJI_0001.MP4",
+        1,
+        1000,
+        1_700_000_000,
+    );
     let on_card = dcim.join("DJI_0001.MP4");
-    touch(&on_card, 1, 1000, 1_700_000_000);
+    // Same bytes, same name-independent size — but sitting in the library, not on
+    // a card root. The location guard has to reject it on that alone.
     let off_card = lib.join("precious.mp4");
     touch(&off_card, 1, 1000, 1_700_000_000);
 
@@ -1114,6 +1126,44 @@ fn commit_reclaim_only_deletes_card_files() {
     assert_eq!(res.deleted, 1, "only the card file is removed");
     assert!(!on_card.exists(), "card file deleted");
     assert!(off_card.exists(), "a path off the card is never touched");
+}
+
+/// Plan and commit are two separate calls with a confirm dialog between them, and
+/// a camera's card mounts at the same path every time. Swapping cards at the
+/// dialog must not let the commit delete the *new* card's never-imported footage
+/// just because it occupies a planned path.
+#[test]
+fn commit_reclaim_rechecks_identity_not_just_location() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    let dcim = d.path().join("card/DCIM");
+    fs::create_dir_all(&state).unwrap();
+
+    let c = cfg(&lib, &state, Some(dcim.clone()));
+    seed_imported(
+        &c,
+        &dcim,
+        None,
+        "bali",
+        "dji",
+        "DJI_0001.MP4",
+        1,
+        1000,
+        1_700_000_000,
+    );
+    let planned = dcim.join("DJI_0001.MP4");
+    let plan = vec![planned.display().to_string()];
+
+    // The card is swapped: same mount, same camera filename, different footage.
+    touch(&planned, 9, 1000, 1_700_500_000);
+
+    let res = reel_core::commit_reclaim(&c, &plan).expect("commit ok");
+    assert_eq!(res.deleted, 0, "a different card's clip is not the plan");
+    assert!(
+        planned.exists(),
+        "never-imported footage survives a stale plan"
+    );
 }
 
 // ---- review: playlist, marks, clip server ----
