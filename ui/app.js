@@ -2417,6 +2417,24 @@ function deleteMark(idx) {
   updateFilmstripActive();
   scheduleSave();
 }
+// The selected mark's index, only if it sits on `master`, else -1. Selection
+// outlives clip changes (`[`/`]`, a filmstrip click), so by the time `x`/⌫ lands
+// it can name a mark on a clip that isn't on screen.
+function selectedMarkOn(marks, selected, master) {
+  return selected != null && marks[selected] && marks[selected].master === master ? selected : -1;
+}
+// `x` / ⌫: delete the selected mark, but only the one the user can see on this
+// clip. A selection left on another clip is named, never silently deleted.
+function deleteSelectedMark() {
+  if (P.selected == null || !P.marks[P.selected]) return;
+  const c = curClip();
+  const idx = selectedMarkOn(P.marks, P.selected, c && c.master);
+  if (idx >= 0) return deleteMark(idx);
+  const at = P.clips.findIndex((k) => k.master === P.marks[P.selected].master) + 1;
+  toast(
+    `The selected segment is on clip ${at || "another"} — open it first, or use ✕ in the Marks panel.`
+  );
+}
 function undo() {
   if (P.pendingIn != null) {
     P.pendingIn = null;
@@ -3049,7 +3067,7 @@ document.addEventListener("keydown", (e) => {
     case "x":
       // sits with ⌫/del: same action, whichever hand is free
       e.preventDefault();
-      if (P.selected != null) deleteMark(P.selected);
+      deleteSelectedMark();
       break;
     case "m":
       toggleMarksPanel();
@@ -3074,7 +3092,7 @@ document.addEventListener("keydown", (e) => {
     case "Backspace":
       e.preventDefault();
       if (e.shiftKey) deleteCurrentClip();
-      else if (P.selected != null) deleteMark(P.selected);
+      else deleteSelectedMark();
       break;
   }
 });

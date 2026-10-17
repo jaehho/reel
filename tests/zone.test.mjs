@@ -44,5 +44,19 @@ check("parked on the start", zoneAction(2.5, { ...LOOP, zoneStart: 2.5 }), "none
 // Resuming clears `free`, so the loop behaves normally again.
 check("loop resumed after a trim", zoneAction(11.5, { ...LOOP, zoneEnd: 11.5 }), "wrap");
 
+// `x`/⌫ may only delete the selected mark when it is on the clip on screen: the
+// selection survives `[`/`]`, so it can name a mark on another clip.
+const sel = src.match(/function selectedMarkOn\(marks, selected, master\) \{[\s\S]*?\n\}/);
+if (!sel) {
+  console.error("FAIL: selectedMarkOn not found in ui/app.js — was it renamed?");
+  process.exit(1);
+}
+const selectedMarkOn = new Function(`${sel[0]}; return selectedMarkOn;`)();
+const marks = [{ master: "a.mp4" }, { master: "b.mp4" }];
+check("selected mark on this clip", selectedMarkOn(marks, 1, "b.mp4"), 1);
+check("selected mark on another clip", selectedMarkOn(marks, 1, "a.mp4"), -1);
+check("nothing selected", selectedMarkOn(marks, null, "a.mp4"), -1);
+check("stale selection past the end", selectedMarkOn(marks, 5, "a.mp4"), -1);
+
 console.log(fails ? `\n${fails} failed` : `\nall passed`);
 process.exit(fails ? 1 : 0);
