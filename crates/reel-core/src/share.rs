@@ -10,16 +10,23 @@
 //! already backs the cloud. `rclone config dump` yields its `url`/`user`/`pass`,
 //! `rclone reveal` de-obscures the password, and the Nextcloud base URL is the
 //! part of the webdav URL before `/remote.php`. Requests go out through `curl`
-//! (its Basic-auth fed on stdin, never argv, so no secret hits the process
-//! table) — the same shell-out approach as the rest of the engine.
+//! with its Basic-auth fed on stdin, never argv — the same shell-out approach as
+//! the rest of the engine.
+//!
+//! One caveat, stated plainly because it used to be claimed away: `rclone reveal`
+//! takes its input positionally, so the *obscured* password — which rclone's fixed
+//! key makes password-equivalent — is briefly visible in `/proc/<pid>/cmdline`.
+//! See [`reveal`], which memoises to hold that to once per process.
 
 use crate::config::Config;
 use crate::model::{Sharee, TripShare};
 use crate::rclone::remote_name;
 use crate::store::{now_epoch, write_atomic};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 
 /// OCS collaborator permissions: read+update+create+delete — everything but
 /// reshare, so a friend can pull the trip and push their own footage back, but
@@ -180,10 +187,26 @@ fn resolve(cfg: &Config) -> Result<Ocs, String> {
 }
 
 /// De-obscure an rclone-stored password (`rclone reveal`), the reverse of the
-/// obscuring rclone applies in its config. The obscured form (already on disk) is
-/// what's passed as the argument; the plaintext only ever lives in memory and is
-/// handed to curl on stdin.
+/// obscuring rclone applies in its config. The plaintext only ever lives in memory
+/// and is handed to curl on stdin.
+///
+/// The obscured form goes to rclone as an argument, which is the one unavoidable
+/// exposure in this module: `rclone reveal` takes its input positionally and has no
+/// stdin mode, and rclone's obscuring uses a fixed built-in key — so the obscured
+/// string is password-equivalent, and for the length of that call it is visible in
+/// `/proc/<pid>/cmdline` to other local users. Memoised for exactly that reason:
+/// `resolve` runs on every mutating share op, and this turns "one window per
+/// action" into "one window per process". Closing it entirely would mean
+/// reimplementing rclone's AES-CTR obscuring in-crate, which is a crypto
+/// dependency this engine doesn't otherwise need.
 fn reveal(obscured: &str) -> Result<String, String> {
+    static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(c) = cache.lock() {
+        if let Some(hit) = c.get(obscured) {
+            return Ok(hit.clone());
+        }
+    }
     let out = Command::new("rclone")
         .args(["reveal", obscured])
         .output()
@@ -191,9 +214,13 @@ fn reveal(obscured: &str) -> Result<String, String> {
     if !out.status.success() {
         return Err("couldn't read the remote's password from rclone".into());
     }
-    Ok(String::from_utf8_lossy(&out.stdout)
+    let pass = String::from_utf8_lossy(&out.stdout)
         .trim_end_matches(['\n', '\r'])
-        .to_string())
+        .to_string();
+    if let Ok(mut c) = cache.lock() {
+        c.insert(obscured.to_string(), pass.clone());
+    }
+    Ok(pass)
 }
 
 /// Escape a value for a curl `-K` config double-quoted string.
