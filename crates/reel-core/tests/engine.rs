@@ -46,6 +46,15 @@ fn only_direct_children_of_the_library_are_trips() {
 }
 
 #[test]
+fn a_half_specified_session_window_is_an_error_not_the_whole_card() {
+    use reel_core::session_window as w;
+    assert_eq!(w(Some(1), Some(2)), Ok(Some((1, 2))));
+    assert_eq!(w(None, None), Ok(None));
+    assert!(w(Some(1), None).is_err());
+    assert!(w(None, Some(2)).is_err());
+}
+
+#[test]
 fn classifies_cameras() {
     assert_eq!(kind_of(Path::new("/x/DJI_0001.MP4")), Kind::Dji);
     assert_eq!(kind_of(Path::new("/x/GX010001.MP4")), Kind::Gopro);

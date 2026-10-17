@@ -27,19 +27,20 @@ pub fn clip_base(base: tauri::State<'_, ClipBase>) -> String {
 /// its footage (and now reads its sync baseline), so it must never run on the UI
 /// thread. Runs concurrently with `scan_card` (the frontend awaits both together).
 #[tauri::command]
-pub async fn list_trips() -> Vec<Trip> {
+pub async fn list_trips() -> Result<Vec<Trip>, String> {
     let cfg = Config::from_env();
     match tauri::async_runtime::spawn_blocking(move || {
         reel_core::log::timed("list_trips", || reel_core::list_trips(&cfg))
     })
     .await
     {
-        Ok(t) => t,
+        Ok(t) => Ok(t),
         Err(join) => {
             // Was a bare `unwrap_or_default()`: a panicking walk rendered as an
-            // empty dashboard, indistinguishable from having no trips at all.
+            // empty dashboard, indistinguishable from having no trips at all. Log
+            // it and hand the UI the error (its `load()` shows "Couldn't load").
             reel_core::log::error("tauri", &format!("list_trips failed: {join}"));
-            Vec::new()
+            Err(format!("listing trips failed: {join}"))
         }
     }
 }
@@ -48,19 +49,19 @@ pub async fn list_trips() -> Vec<Trip> {
 /// the library (to tell which sessions are safe to clear), so keep it off the UI
 /// thread too.
 #[tauri::command]
-pub async fn scan_card() -> Option<CardInfo> {
+pub async fn scan_card() -> Result<Option<CardInfo>, String> {
     let cfg = Config::from_env();
     match tauri::async_runtime::spawn_blocking(move || {
         reel_core::log::timed("scan_card", || reel_core::scan_card(&cfg))
     })
     .await
     {
-        Ok(c) => c,
+        Ok(c) => Ok(c),
         Err(join) => {
             // Same trap as list_trips: `.ok().flatten()` made a panicked scan
             // look exactly like "no card inserted".
             reel_core::log::error("tauri", &format!("scan_card failed: {join}"));
-            None
+            Err(format!("scanning the card failed: {join}"))
         }
     }
 }
@@ -148,7 +149,7 @@ pub async fn plan_reclaim(
     offline: bool,
 ) -> Result<ReclaimPlan, String> {
     let cfg = Config::from_env();
-    let window = start.zip(end);
+    let window = reel_core::session_window(start, end)?;
     match tauri::async_runtime::spawn_blocking(move || {
         reel_core::plan_reclaim(&cfg, window, offline, |p| {
             let _ = channel.send(p);
@@ -252,7 +253,7 @@ pub async fn save_marks(trip: String, marks: Vec<Mark>) -> Result<usize, String>
 #[tauri::command]
 pub async fn card_playlist(start: Option<i64>, end: Option<i64>) -> Result<Playlist, String> {
     let cfg = Config::from_env();
-    let window = start.zip(end);
+    let window = reel_core::session_window(start, end)?;
     match tauri::async_runtime::spawn_blocking(move || reel_core::card_playlist(&cfg, window)).await
     {
         Ok(result) => result,
@@ -456,7 +457,7 @@ pub async fn clear_discarded(
     end: Option<i64>,
 ) -> Result<ReclaimResult, String> {
     let cfg = Config::from_env();
-    let window = start.zip(end);
+    let window = reel_core::session_window(start, end)?;
     match tauri::async_runtime::spawn_blocking(move || reel_core::clear_discarded(&cfg, window))
         .await
     {

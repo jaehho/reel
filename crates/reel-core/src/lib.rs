@@ -38,7 +38,7 @@ pub mod trips;
 pub mod wipe;
 
 pub use archive::{commit_archive, plan_archive};
-pub use cards::scan_card;
+pub use cards::{scan_card, session_window};
 pub use config::Config;
 pub use cut::cut_trip;
 pub use dedup::{resolve as resolve_dupes, scan as scan_dupes};
