@@ -3540,6 +3540,10 @@ function dropClipFromPlayer(gone) {
   P.marks = P.marks.filter((m) => m.master !== gone.master);
   P.clips.splice(i, 1);
   P.selected = null;
+  // Undo snapshots hold the whole mark list, including the departed clip's marks;
+  // `u` would restore them and the autosave would persist marks for a master that
+  // is no longer in this trip.
+  P.history = [];
   if (!P.clips.length) return closeReview();
   renderFilmstrip();
   renderMarks();
