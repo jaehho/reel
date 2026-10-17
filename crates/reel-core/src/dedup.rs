@@ -299,13 +299,26 @@ pub fn resolve(
             let lp_here = rm.local && lp.is_file() && under(&lp, &cfg.lib);
             let rm_id = if lp_here { fileid_of(&lp).ok() } else { None };
 
-            // If both this copy and the canonical are on disk, they must be
-            // byte-identical — a name+size match alone isn't enough to delete.
-            if let (Some(k), Some(v)) = (&keep_id, &rm_id) {
-                if k != v {
+            // Byte identity has to be *proved*, not assumed from a name+size match.
+            // The old `if let (Some, Some)` silently degraded to no check at all
+            // whenever the canonical wasn't local — `keep_id` is `None` for a
+            // cloud-only keeper — so overriding the suggested keeper to a cloud copy
+            // deleted a local file on a `(basename, size)` match alone. Refuse
+            // instead: we can't hash what isn't on this machine.
+            match (&keep_id, &rm_id) {
+                (Some(k), Some(v)) if k != v => {
                     res.skipped += 1;
                     continue;
                 }
+                (Some(_), Some(_)) => {}
+                // A local copy we could hash, against a keeper we couldn't.
+                _ if lp_here => {
+                    res.skipped += 1;
+                    continue;
+                }
+                // Neither side is local — nothing here is being unlinked from disk,
+                // and the cloud leg below is guarded by `canonical_safe`.
+                _ => {}
             }
 
             let mut removed_any = false;

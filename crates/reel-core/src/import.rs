@@ -196,7 +196,19 @@ pub fn import_window(
         let bytes = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
         // A byte-identical copy already sitting in the trip is a pre-ledger import:
         // record it and move on, so the ledger self-heals without re-copying.
-        if dest.is_file() && fs::metadata(&dest).map(|m| m.len()).unwrap_or(0) == bytes {
+        //
+        // "Byte-identical" has to mean the content id, not the length. Same name +
+        // same size is not the same clip: reformat a GoPro and it restarts at
+        // `GX010001.MP4`, so a *different* clip of a coincidentally equal size
+        // claims this one's id, is never copied, and the card original is then
+        // cleared — `plan_reclaim` resolves it by content id, finds this row, and
+        // its cloud gate hash-checks the old local file, which really is up there.
+        // `fileid_of` is already computed for the source, so this costs one read of
+        // a file we were about to trust.
+        if dest.is_file()
+            && fs::metadata(&dest).map(|m| m.len()).unwrap_or(0) == bytes
+            && fileid_of(&dest).ok().as_deref() == Some(fileid.as_str())
+        {
             let row = ledger_row(&fileid, trip, &cfg.user, kind.dir(), &base, bytes, at);
             ledger.upsert(row.clone());
             new_rows.push(row);
