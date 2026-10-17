@@ -33,6 +33,19 @@ fn cfg(lib: &Path, state: &Path, dji_sd: Option<PathBuf>) -> Config {
 }
 
 #[test]
+fn only_direct_children_of_the_library_are_trips() {
+    // A `.reel` two levels down can't be addressed by any op (they all join the
+    // bare name onto the library), so it must not be listed as a trip.
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    touch(&lib.join("japan/.reel"), 0, 1, 1);
+    touch(&lib.join("2025/japan/.reel"), 0, 1, 1);
+    let c = cfg(&lib, &d.path().join("state"), None);
+    let dirs = reel_core::trips::trip_dirs(&c);
+    assert_eq!(dirs, vec![lib.join("japan")]);
+}
+
+#[test]
 fn classifies_cameras() {
     assert_eq!(kind_of(Path::new("/x/DJI_0001.MP4")), Kind::Dji);
     assert_eq!(kind_of(Path::new("/x/GX010001.MP4")), Kind::Gopro);
