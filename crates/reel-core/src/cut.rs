@@ -89,6 +89,8 @@ pub fn cut_trip(
 
     let count = marks.len();
     let (mut made, mut skipped, mut failed) = (0, 0, 0);
+    // ffmpeg's own words for each failure, logged once at the end.
+    let mut reasons: Vec<String> = Vec::new();
     for (i, m) in marks.iter().enumerate() {
         let n = i + 1;
         let Some(master) = locate(Path::new(&m.master), &dir) else {
@@ -108,6 +110,7 @@ pub fn cut_trip(
             format!("{stem}_c{n:02}_{slug}.mp4")
         };
         let out = clips.join(&name);
+        let name_for_err = name.clone();
         on(CutProgress {
             file: name,
             index: n,
@@ -121,8 +124,12 @@ pub fn cut_trip(
         // primary video + optional audio, dropping telemetry/timecode/thumbnail
         // tracks an mp4 can't hold. Temp sibling → an interrupted cut never
         // leaves a half clip that looks finished.
-        let tmp = out.with_extension("partial.mp4");
-        let _ = std::fs::remove_file(&tmp);
+        // Unique per process and call. With a fixed name two concurrent cuts of one
+        // trip (reachable whenever a re-render restores the Cut button mid-run)
+        // shared a scratch file, each deleting the other's in-progress output, and
+        // the first rename published a garbled clip that then looked finished to
+        // the `out.exists()` skip above.
+        let tmp = crate::store::temp_sibling_keep_ext(&out);
         let ok = Command::new("ffmpeg")
             .args([
                 "-nostdin",
@@ -149,16 +156,38 @@ pub fn cut_trip(
             ])
             .arg(&tmp)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+            .stderr(Stdio::piped())
+            .output();
+        // Keep ffmpeg's last line. `proxy` and `still` both surface it; cut threw it
+        // away and reported a bare `failed` count, so a whole class of legible
+        // failures was undiagnosable — a zero-width mark, for one, which the
+        // timeline export deliberately accepts but `-ss`/`-to` rejects outright
+        // ("-to value smaller than -ss").
+        let ok = match &ok {
+            Ok(o) if o.status.success() => true,
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                if let Some(line) = err.lines().last().map(str::trim).filter(|l| !l.is_empty()) {
+                    reasons.push(format!("{}: {line}", &name_for_err));
+                }
+                false
+            }
+            Err(_) => false,
+        };
         if ok && tmp.is_file() && std::fs::rename(&tmp, &out).is_ok() {
             made += 1;
         } else {
             let _ = std::fs::remove_file(&tmp);
             failed += 1;
         }
+    }
+    if failed > 0 && !reasons.is_empty() {
+        crate::log::event(
+            crate::log::Level::Warn,
+            "engine",
+            "cut: some segments failed",
+            Some(serde_json::json!({ "trip": trip, "failed": failed, "why": reasons })),
+        );
     }
     Ok(CutResult {
         trip: trip.to_string(),

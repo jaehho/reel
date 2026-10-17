@@ -163,6 +163,14 @@ const shareProgress = new Map();
 // all") feeds it, so you can queue a batch and walk away. Module state, so a Rescan
 // mid-batch re-renders without interrupting the drain.
 const shareQueue = [];
+// Trips with a cut in flight, and their latest progress — module state for the same
+// reason as sharing. The old guard lived on the card's own `dataset.cutting`, which
+// a re-render (a background share finishing, a Rescan) destroyed along with the
+// node; the fresh card then showed a live Cut button, and a second click raced the
+// first cut on one trip — corrupting the output the temp-file scheme was meant to
+// protect. Keyed by trip name, so the guard and the readout both outlive re-renders.
+const cuttingTrips = new Set();
+const cutProgress = new Map();
 let shareDraining = false;
 
 let toastTimer;
@@ -601,13 +609,17 @@ function footActions(t, card) {
   // the primary and the rightmost from the moment there are marks, and Cut sits to
   // its left in the same place whether it says "cut these" or "cut the new ones".
   const marked = t.marks > 0 && t.masters > 0;
-  if (marked) {
+  if (marked && cuttingTrips.has(t.name)) {
+    // A cut is already running for this trip — show its live bar in place of the
+    // button, refilled from module state, so a re-render can't offer a second cut.
+    actions.append(cutProgressBox(t.name));
+  } else if (marked) {
     const cut = elHTML("button", "btn small ghost", '<span class="btn-ico" aria-hidden="true">✂</span> Cut');
     cut.type = "button";
     cut.title = t.clips > 0
       ? `Cut ${t.name}'s new marks into clips (existing ones are left alone)`
       : `Cut ${t.name}'s ${plural(t.marks, "mark")} into standalone clips`;
-    cut.onclick = () => startCut(t, card);
+    cut.onclick = () => startCut(t);
     actions.append(cut);
   }
   // `t.next` used to say "cut" for a marked trip, so this had to override it to
@@ -983,42 +995,58 @@ function cutSummary(r) {
   return bits.join(" · ");
 }
 
-async function startCut(t, card) {
-  const foot = card.querySelector(".trip-foot");
-  if (!foot || card.dataset.cutting) return;
-  card.dataset.cutting = "1";
+// A cut-progress bar bound to a trip by a `data-cut-trip` marker, mirroring the
+// share bar — `paintCutProgress` refills it from module state, so a re-render
+// during the cut re-creates the bar rather than orphaning a captured element.
+function cutProgressBox(trip) {
+  const box = el("div", "share-prog");
+  box.dataset.cutTrip = trip;
+  box.append(el("div", "share-row"), el("div", "bar"));
+  box.firstChild.append(el("span", "share-stage", "Cutting…"), el("span", "share-pct tnum", ""));
+  box.lastChild.append(el("div", "bar-fill"));
+  paintOneCutBox(box, cutProgress.get(trip));
+  return box;
+}
+function paintOneCutBox(box, p) {
+  const stage = box.querySelector(".share-stage");
+  const pct = box.querySelector(".share-pct");
+  const fill = box.querySelector(".bar-fill");
+  if (!stage || !pct || !fill) return;
+  stage.textContent = p && p.file ? `Cutting ${p.file}` : "Cutting…";
+  pct.textContent = p && p.count ? `${p.index}/${p.count}` : "";
+  const f = p && p.count ? p.index / p.count : 0;
+  fill.style.transform = `scaleX(${Math.max(0, Math.min(1, f))})`;
+}
+function paintCutProgress(trip) {
+  const p = cutProgress.get(trip);
+  for (const box of document.querySelectorAll("[data-cut-trip]")) {
+    if (box.dataset.cutTrip === trip) paintOneCutBox(box, p);
+  }
+}
 
-  // Reuse the share progress readout (bar + row), tinted the trip's own colour.
-  foot.innerHTML = "";
-  const stage = el("span", "share-stage", "Cutting…");
-  const pct = el("span", "share-pct tnum", "");
-  const fill = el("div", "bar-fill");
-  const prog = el("div", "share-prog");
-  prog.append(el("div", "share-row"), el("div", "bar"));
-  prog.firstChild.append(stage, pct);
-  prog.lastChild.append(fill);
-  foot.append(prog);
-  const setFill = (f) => (fill.style.transform = `scaleX(${Math.max(0, Math.min(1, f))})`);
-  setFill(0);
+async function startCut(t) {
+  if (cuttingTrips.has(t.name)) return; // one cut per trip; the guard outlives re-renders
+  cuttingTrips.add(t.name);
+  cutProgress.delete(t.name);
+  reflow(); // swap this trip's Cut button for its live bar everywhere it shows
 
   const Ch = window.__TAURI__?.core?.Channel;
   const channel = Ch ? new Ch() : null;
   if (channel)
     channel.onmessage = (p) => {
-      stage.textContent = p.file ? `Cutting ${p.file}` : "Cutting…";
-      pct.textContent = p.count ? `${p.index}/${p.count}` : "";
-      setFill(p.count ? p.index / p.count : 0);
+      cutProgress.set(t.name, p);
+      paintCutProgress(t.name);
     };
 
   try {
     const res = await invoke("cut_trip", { channel, trip: t.name });
-    card.dataset.cutting = "";
     toast(cutSummary(res));
-    await load(); // re-render: the "cut" stat ticks up (the state doesn't move)
   } catch (e) {
-    card.dataset.cutting = "";
-    foot.innerHTML = "";
-    foot.append(el("div", "share-error", String(e)), ...footActions(t, card));
+    toast(String(e));
+  } finally {
+    cuttingTrips.delete(t.name);
+    cutProgress.delete(t.name);
+    await load(); // re-render: the "cut" stat ticks up (the state doesn't move)
   }
 }
 
