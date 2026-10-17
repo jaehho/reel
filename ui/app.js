@@ -1110,6 +1110,11 @@ function setBar(frac) {
 }
 
 function openImport(s) {
+  // A copy is already running — the dialog is mid-import and resetting the form
+  // here would re-enable Import and let a second `import_session` start against the
+  // same ledger snapshot, landing the same card clips in two trips (the exact
+  // failure this app was built to end). Leave the running import alone.
+  if (importing) return;
   impSession = s;
   const c = sessionCounts(s);
   // What will actually copy in: the new captures (or everything, if none imported
@@ -1182,6 +1187,7 @@ function failImport(msg) {
   impProg.hidden = true;
   impName.disabled = false;
   impGo.disabled = false;
+  impCancel.disabled = false;
   impGo.textContent = "Import";
 }
 
@@ -1195,6 +1201,11 @@ async function runImport() {
   impErr.hidden = true;
   impName.disabled = true;
   impGo.disabled = true;
+  // The copy runs on a blocking thread that can't be cancelled, so Cancel can't
+  // honestly stop it — disable it rather than let it close the dialog out from
+  // under a running import (which left the copy going headless and, via a form
+  // reset, allowed a second one to start). Escape and backdrop are already blocked.
+  impCancel.disabled = true;
   impGo.textContent = "Importing…";
   impProg.hidden = false;
   impFile.textContent = "preparing…";
@@ -1213,6 +1224,7 @@ async function runImport() {
       end: impSession.end,
     });
     importing = false;
+    impCancel.disabled = false;
     dlg.close();
     toast(importSummary(res));
     await load();
@@ -1230,7 +1242,10 @@ impName.addEventListener("keydown", (e) => {
   }
 });
 impGo.addEventListener("click", runImport);
-impCancel.addEventListener("click", () => dlg.close());
+impCancel.addEventListener("click", () => {
+  if (importing) return; // can't cancel a running copy; don't close out from under it
+  dlg.close();
+});
 // don't let Escape / backdrop close a copy in flight
 dlg.addEventListener("cancel", (e) => {
   if (importing) e.preventDefault();
