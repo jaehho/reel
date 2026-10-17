@@ -241,6 +241,12 @@ pub struct SyncResult {
     /// Owed ops still queued (remote still couldn't take them).
     pub still_pending: usize,
     pub in_sync: bool,
+    /// Trips the sweep couldn't finish, with why. A whole-library sync keeps going
+    /// past a failing trip on purpose, but it must still say which ones failed:
+    /// reporting a half-finished 39 GiB upload as "✓ updated" is the one thing this
+    /// app can't do. Empty on a per-trip reconcile, which fails loudly instead.
+    #[serde(default)]
+    pub failed: Vec<(String, String)>,
 }
 
 /// One place a clip lives — a `(trip, cloud-relative path)` location that may be on

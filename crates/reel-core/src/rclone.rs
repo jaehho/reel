@@ -49,16 +49,39 @@ pub fn purge(path: &str) -> Result<bool, String> {
         .map_err(|e| format!("couldn't run rclone: {e}"))
 }
 
+/// rclone's exit code for "directory not found" — the one failure that genuinely
+/// means "nothing here yet" rather than "we couldn't find out". Everything else
+/// (1 usage, 2 uncategorised, 5 temporary, 6 less-serious, 7 fatal…) is a failure
+/// to *learn* the cloud's contents and must never be read as an empty listing.
+const EXIT_DIR_NOT_FOUND: i32 = 3;
+
 /// List every file under a cloud path as rclone JSON objects (`Path`, `Size`, …),
-/// recursively. Used to survey who has footage in a trip's cloud. A path that
-/// isn't there exits non-zero and reads as an empty listing, not an error.
+/// recursively. Used to survey who has footage in a trip's cloud.
+///
+/// A path that isn't there yet reads as an empty listing; **every other failure is
+/// an error**. This distinction is load-bearing rather than pedantic: `sync`
+/// classifies a clip that is intended (baseline) and absent locally but missing
+/// from the cloud as a completed delete, and drops it from the baseline. An
+/// archived trip's masters are exactly that shape, and their only copy is the
+/// cloud one — so an auth failure, a dropped network, or a rate limit silently
+/// reported as "empty" would walk them to a permanent delete. `remote_ok` can't
+/// cover this: it only reads the local rclone config and passes while offline.
 pub fn lsjson(path: &str) -> Result<Vec<Value>, String> {
     let out = Command::new("rclone")
         .args(["lsjson", "-R", "--files-only", path])
         .output()
         .map_err(|e| format!("couldn't run rclone: {e}"))?;
     if !out.status.success() {
-        return Ok(Vec::new()); // nothing in the cloud for this path yet
+        if out.status.code() == Some(EXIT_DIR_NOT_FOUND) {
+            return Ok(Vec::new()); // nothing in the cloud for this path yet
+        }
+        let why = String::from_utf8_lossy(&out.stderr);
+        let why = why.lines().last().unwrap_or("").trim();
+        return Err(format!(
+            "couldn't list the cloud at {path}{}{}",
+            if why.is_empty() { "" } else { " — " },
+            why
+        ));
     }
     serde_json::from_slice(&out.stdout).map_err(|e| format!("couldn't read cloud listing: {e}"))
 }

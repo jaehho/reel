@@ -4541,6 +4541,10 @@ function syncSummary(r) {
   if (r.restored) bits.push(`${plural(r.restored, "clip")} brought back`);
   if (r.deleted) bits.push(`${plural(r.deleted, "clip")} removed from the cloud`);
   if (r.stillPending) bits.push(`${plural(r.stillPending, "op")} still owed`);
+  // A trip that failed mid-sweep must show as failed, never fold into a clean
+  // summary — a half-finished upload reported as done is the one thing sync can't do.
+  const failed = (r.failed || []).length;
+  if (failed) bits.push(`${plural(failed, "trip")} failed`);
   if (!bits.length) return r.inSync ? "Already in sync" : "Nothing to do";
   return bits.join(" · ");
 }
@@ -4767,6 +4771,28 @@ function finishSyncRow(li) {
   }
 }
 
+// Recolour the rows the engine reported as failed. `sync_all` keeps going past a
+// failing trip (a bad remote, an upload that died) rather than aborting the sweep,
+// so the phases-seen inference above would settle a trip that pushed some bytes as
+// "updated" — the row has to be corrected from the authoritative result.
+function markFailedSyncRows(failed) {
+  const why = new Map(failed || []);
+  // Match on dataset rather than a built selector, so a trip name never has to be
+  // escaped into a query (the same reason paintShareProgress iterates).
+  for (const li of $("#syncall-log").querySelectorAll("li")) {
+    if (!why.has(li.dataset.trip)) continue;
+    li.classList.remove("busy", "done", "synced");
+    li.classList.add("failed");
+    const mark = li.querySelector(".log-mark");
+    const note = li.querySelector(".log-note");
+    if (mark) mark.textContent = "✕";
+    if (note) {
+      note.textContent = "failed";
+      li.title = why.get(li.dataset.trip); // the reason, on hover
+    }
+  }
+}
+
 $("#sync-all").addEventListener("click", async () => {
   const b = $("#sync-all");
   if (b.disabled) return;
@@ -4833,9 +4859,11 @@ $("#sync-all").addEventListener("click", async () => {
   try {
     const r = await invoke("sync_all", { channel });
     finishSyncRow(curRow);
+    markFailedSyncRows(r.failed);
     setBar(obar, 1);
     setBar(fill, 1);
-    $("#syncall-overall").textContent = "Done";
+    const anyFailed = (r.failed || []).length > 0;
+    $("#syncall-overall").textContent = anyFailed ? "Done — some trips failed" : "Done";
     $("#syncall-stage").textContent = "";
     $("#syncall-pct").textContent = "";
     $("#syncall-meta").textContent = syncSummary(r);

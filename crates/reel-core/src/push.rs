@@ -152,8 +152,15 @@ pub fn push_trip(
         })
         .collect();
     let _ = FileSet::update(&cfg.base_path(trip), |base| {
-        base.files
-            .retain(|rel, _| rel.split('/').next() != Some(cfg.user.as_str()));
+        // Drop only the rows this push actually re-states: yours *and* still on
+        // disk. A row of yours with no local file is archived footage — freed
+        // locally, still in the cloud, and deliberately left in the baseline by
+        // `commit_archive`. Clearing it here would make the next sync classify it
+        // as a completed delete (local absent, baseline absent, cloud present is a
+        // zombie to clean) and offer to erase the only remaining copy.
+        base.files.retain(|rel, _| {
+            rel.split('/').next() != Some(cfg.user.as_str()) || !dir.join(rel).exists()
+        });
         for (rel, size) in &rows {
             base.insert(rel, *size);
         }

@@ -2648,6 +2648,93 @@ fn sync_pulls_new_pool_footage() {
     assert!(reel_core::sync_status(&c, "bali", true).unwrap().in_sync);
 }
 
+/// After an archive the cloud holds the *only* copy, and the baseline row is what
+/// keeps it classified as intended-in-cloud rather than an offline-delete zombie.
+/// A later push (importing one new clip, then sharing — or the topbar sweep, which
+/// pushes every trip) must not clear that row while re-stating its own uploads.
+#[test]
+fn pushing_after_an_archive_keeps_the_archived_footage_in_the_baseline() {
+    if !have_rclone() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (_lib, _cloud, c, trip) = sync_env(d.path());
+    reel_core::push_trip(&c, "bali", |_| {}).expect("push");
+    reel_core::commit_archive(&c, "bali", |_| {}).expect("archive");
+
+    // New footage arrives and is shared. The archived master is still gone locally.
+    touch(
+        &trip.join("jaeho/dji/DJI_0002.MP4"),
+        4,
+        1_000_000,
+        1_700_100_000,
+    );
+    reel_core::push_trip(&c, "bali", |_| {}).expect("second push");
+
+    let b = reel_core::store::FileSet::load(&c.base_path("bali"));
+    assert!(
+        b.get("jaeho/dji/DJI_0001.MP4").is_some(),
+        "the archived row survives a later push — it's the only thing keeping the \
+         cloud's sole copy from reading as a completed delete"
+    );
+    assert!(
+        b.get("jaeho/dji/DJI_0002.MP4").is_some(),
+        "and the new one landed"
+    );
+
+    let s = reel_core::sync_status(&c, "bali", true).expect("status");
+    assert!(
+        s.deleted_local.is_empty(),
+        "archived raw still must not read as a zombie to clean"
+    );
+}
+
+/// `rclone lsjson` exits non-zero for auth failures, dropped networks and
+/// permission errors, not just "the path isn't there". Reading all of those as an
+/// empty cloud walks every archived clip to `b_removes` — the baseline row is
+/// dropped, and the next refresh offers the only remaining copy for deletion.
+#[test]
+fn a_failed_cloud_listing_is_an_error_not_an_empty_cloud() {
+    if !have_rclone() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (_lib, cloud, c, _trip) = sync_env(d.path());
+    reel_core::push_trip(&c, "bali", |_| {}).expect("push");
+    reel_core::commit_archive(&c, "bali", |_| {}).expect("archive");
+
+    // Make the listing fail the way a real outage does: readable path, unreadable
+    // contents (rclone exits 6 — "less serious errors", not 3 "directory not found").
+    let pooled = cloud.join("bali");
+    let mut perms = fs::metadata(&pooled).unwrap().permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o000);
+    }
+    fs::set_permissions(&pooled, perms).unwrap();
+
+    let got = reel_core::sync_status(&c, "bali", true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut back = fs::metadata(&pooled).unwrap().permissions();
+        back.set_mode(0o755);
+        fs::set_permissions(&pooled, back).unwrap();
+    }
+
+    assert!(
+        got.is_err(),
+        "a cloud we couldn't read must surface as an error, never as an empty cloud"
+    );
+    let b = reel_core::store::FileSet::load(&c.base_path("bali"));
+    assert!(
+        b.get("jaeho/dji/DJI_0001.MP4").is_some(),
+        "and the failed listing must not have edited the baseline"
+    );
+}
+
 #[test]
 fn archive_keeps_a_trip_in_sync() {
     if !have_rclone() {

@@ -52,6 +52,14 @@ fn base_of(rel: &str) -> &str {
     rel.rsplit('/').next().unwrap_or(rel)
 }
 
+/// Same guard every other trip-taking module applies. It matters more here than
+/// most: a trip name reaches `base_path`/`cloud_cache_path` as `{trip}.tsv` (so
+/// `../..` escapes the state dir) and `{remote}/{trip}/…` on the delete and purge
+/// paths.
+fn valid_trip(name: &str) -> bool {
+    !name.is_empty() && !name.contains(['/', '\\']) && name != "." && name != ".."
+}
+
 /// Local masters of a trip as rel → size (skips derived dirs via `masters_in`).
 pub fn local_set(cfg: &Config, trip: &str) -> FileSet {
     let trip_dir = cfg.lib.join(trip);
@@ -250,6 +258,9 @@ fn is_migrating(pending: &Pending, trip: &str) -> bool {
 /// the cache + persists any baseline backfills); otherwise the cached listing is
 /// used, or tier-1 only (push/deletions unknown) if the cloud was never fetched.
 pub fn sync_status(cfg: &Config, trip: &str, refresh: bool) -> Result<TripSync, String> {
+    if !valid_trip(trip) {
+        return Err(format!("invalid trip name: {trip:?}"));
+    }
     let l = local_set(cfg, trip);
     let base_p = cfg.base_path(trip);
     // Whether a baseline was ever written — distinguishes a pre-feature trip (no
@@ -259,6 +270,14 @@ pub fn sync_status(cfg: &Config, trip: &str, refresh: bool) -> Result<TripSync, 
     let mut b = FileSet::load(&base_p);
     let pending = Pending::load(&cfg.pending_path());
     let skip = pending_move_rels(&pending, trip);
+    // Resolved before anything reads or writes the cloud. While a rename/purge is
+    // queued this trip's footage sits in the cloud under the OLD name, so a fetch
+    // here legitimately comes back empty — and an empty listing must not be
+    // allowed to edit the baseline or land in the cache. Clearing the *reported*
+    // buckets afterwards (as this used to do alone) is too late: by then the
+    // baseline write below has already dropped every archived row, and the next
+    // status reads those clips as zombies to clean.
+    let migrating = is_migrating(&pending, trip);
 
     // Rows adopted by the first-run migration below, replayed against fresh state
     // when we persist (the cloud fetch in between is a network round trip).
@@ -269,7 +288,11 @@ pub fn sync_status(cfg: &Config, trip: &str, refresh: bool) -> Result<TripSync, 
         if rclone::remote_ok(&cfg.remote).is_ok() {
             let fetched = cloud_set(cfg, trip)?;
             let now = now_epoch();
-            let _ = save_cloud_cache(&cfg.cloud_cache_path(trip), now, &fetched);
+            // Not while migrating: the listing is empty because the footage is
+            // still under the old name, and caching that would outlive the rename.
+            if !migrating {
+                let _ = save_cloud_cache(&cfg.cloud_cache_path(trip), now, &fetched);
+            }
             // Migration: the first time we see a trip's cloud with no baseline file
             // yet, adopt what's already synced — clips present both sides, plus your
             // own cloud footage (e.g. archived raw) — so footage shared/archived
@@ -310,7 +333,7 @@ pub fn sync_status(cfg: &Config, trip: &str, refresh: bool) -> Result<TripSync, 
         ts.deleted_upstream = d.deleted_upstream;
         ts.cloud_only = d.cloud_only;
         ts.conflicts = d.conflicts;
-        if live {
+        if live && !migrating {
             // Replay the edits against fresh state under the lock — a push, pull or
             // delete may have written this baseline while the cloud listing above was
             // in flight, and a wholesale save of our snapshot would drop it.
@@ -336,7 +359,7 @@ pub fn sync_status(cfg: &Config, trip: &str, refresh: bool) -> Result<TripSync, 
     // A queued rename/purge means this footage is already in the cloud (under the
     // old name); don't offer to re-upload or pull it — the reconcile replays the
     // move first.
-    if is_migrating(&pending, trip) {
+    if migrating {
         ts.to_push.clear();
         ts.to_pull.clear();
         ts.deleted_local.clear();
@@ -448,6 +471,9 @@ pub fn reconcile(
     actions: SyncActions,
     mut on: impl FnMut(SyncProgress),
 ) -> Result<SyncResult, String> {
+    if !valid_trip(trip) {
+        return Err(format!("invalid trip name: {trip:?}"));
+    }
     rclone::remote_ok(&cfg.remote)?;
 
     // 1) replay this trip's owed ops first (a queued rename must run before a push
@@ -572,6 +598,9 @@ pub fn reconcile(
         replayed,
         still_pending,
         in_sync: final_status.in_sync,
+        // A single-trip reconcile propagates its failure with `?` rather than
+        // collecting it, so there is never a partial success to report here.
+        failed: Vec::new(),
     })
 }
 
@@ -624,6 +653,7 @@ pub fn reconcile_all(cfg: &Config, mut on: impl FnMut(SyncProgress)) -> Result<S
     };
     let mut pushed = 0usize;
     let mut pulled = 0usize;
+    let mut failed: Vec<(String, String)> = Vec::new();
     let dirs = trip_dirs(cfg);
     let trip_count = dirs.len() as u32;
     for (i, dir) in dirs.iter().enumerate() {
@@ -634,13 +664,26 @@ pub fn reconcile_all(cfg: &Config, mut on: impl FnMut(SyncProgress)) -> Result<S
         // One trip failing (a bad remote path, say) shouldn't abort the sweep.
         // Each event is stamped with this trip's place in the sweep so the UI can
         // show an overall "trip X of Y" alongside the per-trip line.
-        if let Ok(r) = reconcile(cfg, name, acts, |mut p| {
+        match reconcile(cfg, name, acts, |mut p| {
             p.trip_index = trip_index;
             p.trip_count = trip_count;
             on(p);
         }) {
-            pushed += r.pushed;
-            pulled += r.pulled;
+            Ok(r) => {
+                pushed += r.pushed;
+                pulled += r.pulled;
+            }
+            // Carry the reason out rather than dropping it. Swallowing meant a trip
+            // whose upload died halfway still rendered as "✓ updated".
+            Err(e) => {
+                crate::log::event(
+                    crate::log::Level::Warn,
+                    "engine",
+                    "sync: trip failed during the sweep",
+                    Some(serde_json::json!({ "trip": name, "err": e })),
+                );
+                failed.push((name.to_string(), e));
+            }
         }
     }
 
@@ -653,6 +696,7 @@ pub fn reconcile_all(cfg: &Config, mut on: impl FnMut(SyncProgress)) -> Result<S
         deleted: 0,
         replayed,
         still_pending,
-        in_sync: pushed == 0 && pulled == 0 && still_pending == 0,
+        in_sync: pushed == 0 && pulled == 0 && still_pending == 0 && failed.is_empty(),
+        failed,
     })
 }
