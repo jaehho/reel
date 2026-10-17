@@ -26,7 +26,7 @@ use crate::ledger::Ledger;
 use crate::media::{masters_in, native_proxy_of, rel_stem, under};
 use crate::model::{Mark, MoveResult};
 use crate::rclone;
-use crate::review::{read_marks, write_marks};
+use crate::review::{read_marks, update_marks, write_marks};
 use crate::store::{now_epoch, FileSet, Pending, PendingOp};
 use crate::trips::{set_trip_meta, trip_meta};
 use std::collections::HashMap;
@@ -285,6 +285,9 @@ pub fn move_clips(cfg: &Config, masters: &[String], dest: &str) -> Result<MoveRe
 
     // ---- migrate marks: pull moved masters' segments out of each source trip,
     // repoint them, and append to the destination's marks.tsv ----
+    // One lock across the whole migration, so the player's autosave can't land
+    // between the read of a source and its write-back and undo the strip.
+    let marks_guard = crate::store::state_guard();
     let mut dst_marks = read_marks(&dst_dir);
     let before = dst_marks.len();
     for (src_dir, pairs) in &migrations {
@@ -308,6 +311,7 @@ pub fn move_clips(cfg: &Config, masters: &[String], dest: &str) -> Result<MoveRe
     if marks > 0 {
         let _ = write_marks(&dst_dir, &dst_marks);
     }
+    drop(marks_guard);
 
     // ---- mirror in the cloud, or drop the destination's share claim ----
     let any_cloud = moved_plans.iter().any(|p| p.needs_cloud);
@@ -445,14 +449,15 @@ pub fn rename_trip(cfg: &Config, old: &str, new: &str) -> Result<MoveResult, Str
     // marks: repoint absolute paths from the old dir to the new one.
     let old_prefix = old_dir.display().to_string();
     let new_prefix = new_dir.display().to_string();
-    let mut marks = read_marks(&new_dir);
-    for m in marks.iter_mut() {
-        if let Some(rest) = m.master.strip_prefix(&old_prefix) {
-            m.master = format!("{new_prefix}{rest}");
+    let mut n_marks = 0;
+    let _ = update_marks(&new_dir, |marks| {
+        for m in marks.iter_mut() {
+            if let Some(rest) = m.master.strip_prefix(&old_prefix) {
+                m.master = format!("{new_prefix}{rest}");
+            }
         }
-    }
-    let n_marks = marks.len();
-    let _ = write_marks(&new_dir, &marks);
+        n_marks = marks.len();
+    });
 
     // baseline + cloud cache ride along as file renames (rows are trip-local).
     let _ = fs::rename(cfg.base_path(old), cfg.base_path(new));

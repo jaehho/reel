@@ -2465,6 +2465,13 @@ function scheduleSave() {
   clearTimeout(P.saveT);
   P.saveT = setTimeout(saveMarks, 350);
 }
+// Land any debounced save before an engine op rewrites marks.tsv itself (move,
+// delete): otherwise the timer fires afterwards with the pre-op list.
+async function flushMarks() {
+  if (P.saveT == null) return;
+  clearTimeout(P.saveT);
+  await saveMarks();
+}
 async function saveMarks() {
   P.saveT = null;
   try {
@@ -3388,6 +3395,7 @@ async function moveCurrentClip() {
   const dest = await pickTrip({ title: "Move clip", meta: `${c.name} → another trip`, confirmLabel: "Move", exclude: P.trip });
   if (!dest) return;
   try {
+    await flushMarks();
     const r = await invoke("move_clips", { masters: [c.master], dest });
     if (r.moved > 0) {
       toast(`Moved ${c.name} → ${dest}${r.cloudSynced ? "" : " · re-share needed"}`);
@@ -3410,6 +3418,7 @@ async function deleteCurrentClip() {
   });
   if (!ok) return;
   try {
+    await flushMarks();
     const r = await invoke("delete_clips", { masters: [c.master] });
     toast(deleteSummary(r));
     dropClipFromPlayer(P.i);

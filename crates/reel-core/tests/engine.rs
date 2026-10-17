@@ -1517,6 +1517,34 @@ fn marks_round_trip_cut_compatibly() {
 }
 
 #[test]
+fn concurrent_marks_updates_do_not_lose_each_other() {
+    // The player autosaves while a move/delete filters the same marks.tsv; a bare
+    // read-then-write lets the slower side undo the other's change.
+    let d = tempfile::tempdir().unwrap();
+    let trip = make_trip(&d.path().join("Videos"), "trip");
+    let handles: Vec<_> = (0..16)
+        .map(|i| {
+            let dir = trip.clone();
+            std::thread::spawn(move || {
+                reel_core::review::update_marks(&dir, |m| {
+                    m.push(reel_core::Mark {
+                        master: format!("m{i}"),
+                        start: 0.0,
+                        end: 1.0,
+                        label: String::new(),
+                    })
+                })
+                .unwrap();
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    assert_eq!(reel_core::review::read_marks(&trip).len(), 16);
+}
+
+#[test]
 fn read_marks_skips_comments_and_tolerates_missing_label() {
     let d = tempfile::tempdir().unwrap();
     let trip = d.path().join("trip");

@@ -22,7 +22,7 @@ use crate::ledger::{Ledger, Tombstones};
 use crate::media::{fileid_of, masters_in, masters_under, native_proxy_of, rel_stem, under};
 use crate::model::{DeleteResult, ReclaimResult};
 use crate::rclone;
-use crate::review::{read_marks, write_marks};
+use crate::review::update_marks;
 use crate::store::{now_epoch, FileSet, Pending, PendingOp};
 use crate::trips::trip_meta;
 use std::collections::HashMap;
@@ -212,11 +212,7 @@ pub fn delete_clips(cfg: &Config, masters: &[String]) -> Result<DeleteResult, St
     // strip marks that pointed at anything we removed
     for (trip, gone) in &removed_by_trip {
         let dir = cfg.lib.join(trip);
-        let kept: Vec<_> = read_marks(&dir)
-            .into_iter()
-            .filter(|m| !gone.contains(&m.master))
-            .collect();
-        let _ = write_marks(&dir, &kept);
+        let _ = update_marks(&dir, |marks| marks.retain(|m| !gone.contains(&m.master)));
     }
 
     // Baseline: deleting your own clip means it should no longer be in the cloud.

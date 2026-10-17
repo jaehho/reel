@@ -83,6 +83,18 @@ pub fn write_marks(dir: &Path, marks: &[Mark]) -> std::io::Result<()> {
     })
 }
 
+/// Read-modify-write a trip's `marks.tsv` under the state lock. The player
+/// autosaves the whole list (`save_marks`) while a move, delete, or rename
+/// filters or repoints it; done as two bare read/writes, the slower side's
+/// write-back resurrects a mark the other just removed. Same rule as
+/// `Ledger::update`: slow work first, then merge into fresh state here.
+pub fn update_marks(dir: &Path, f: impl FnOnce(&mut Vec<Mark>)) -> std::io::Result<()> {
+    let _g = crate::store::state_guard();
+    let mut marks = read_marks(dir);
+    f(&mut marks);
+    write_marks(dir, &marks)
+}
+
 /// Build the review playlist for a trip: every master in capture order, each
 /// paired with the file to actually play (proxy when available) and its poster
 /// id, plus the marks saved so far.
@@ -257,6 +269,7 @@ pub fn card_playlist(cfg: &Config, window: Option<(i64, i64)>) -> Result<Playlis
 /// got them from `review_playlist`; nothing else on disk is touched.
 pub fn save_marks(cfg: &Config, trip: &str, marks: Vec<Mark>) -> Result<usize, String> {
     let dir = trip_dir(cfg, trip)?;
-    write_marks(&dir, &marks).map_err(|e| format!("couldn't write marks: {e}"))?;
-    Ok(marks.len())
+    let n = marks.len();
+    update_marks(&dir, |cur| *cur = marks).map_err(|e| format!("couldn't write marks: {e}"))?;
+    Ok(n)
 }
