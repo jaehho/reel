@@ -33,6 +33,28 @@ fn cfg(lib: &Path, state: &Path, dji_sd: Option<PathBuf>) -> Config {
 }
 
 #[test]
+fn only_direct_children_of_the_library_are_trips() {
+    // A `.reel` two levels down can't be addressed by any op (they all join the
+    // bare name onto the library), so it must not be listed as a trip.
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    touch(&lib.join("japan/.reel"), 0, 1, 1);
+    touch(&lib.join("2025/japan/.reel"), 0, 1, 1);
+    let c = cfg(&lib, &d.path().join("state"), None);
+    let dirs = reel_core::trips::trip_dirs(&c);
+    assert_eq!(dirs, vec![lib.join("japan")]);
+}
+
+#[test]
+fn a_half_specified_session_window_is_an_error_not_the_whole_card() {
+    use reel_core::session_window as w;
+    assert_eq!(w(Some(1), Some(2)), Ok(Some((1, 2))));
+    assert_eq!(w(None, None), Ok(None));
+    assert!(w(Some(1), None).is_err());
+    assert!(w(None, Some(2)).is_err());
+}
+
+#[test]
 fn classifies_cameras() {
     assert_eq!(kind_of(Path::new("/x/DJI_0001.MP4")), Kind::Dji);
     assert_eq!(kind_of(Path::new("/x/GX010001.MP4")), Kind::Gopro);
@@ -262,6 +284,69 @@ fn source_frames_stay_until_their_stitched_photo_is_safe() {
         "frames stay while their panorama photo is unimported"
     );
     assert!(dcim.join("PANORAMA/001_0001/PANO_0001.JPG").exists());
+}
+
+#[test]
+fn a_cleared_panorama_cannot_vouch_for_another_with_the_same_seq() {
+    // The 4-digit seq is a per-camera counter, so two different panoramas can
+    // carry the same one. Clearing the first (imported) must not sweep the second's
+    // source frames: its stitched photo was never imported.
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    let dcim = d.path().join("card/DCIM");
+    fs::create_dir_all(&state).unwrap();
+
+    let (a, b) = (1_700_000_100, 1_700_900_000);
+    touch(
+        &dcim.join("DJI_001/DJI_20260101_0039_D.JPG"),
+        2,
+        6_000_000,
+        a,
+    );
+    touch(
+        &dcim.join("PANORAMA/001_0039/PANO_0001.JPG"),
+        3,
+        5_000_000,
+        a - 10,
+    );
+    touch(
+        &dcim.join("DJI_001/DJI_20260102_0039_D.JPG"),
+        4,
+        6_000_000,
+        b,
+    );
+    touch(
+        &dcim.join("PANORAMA/002_0039/PANO_0001.JPG"),
+        5,
+        5_000_000,
+        b - 10,
+    );
+
+    let c = cfg(&lib, &state, Some(dcim.clone()));
+    // Import only the first panorama.
+    reel_core::import_window(&c, "kyoto", a, a, |_| {}).unwrap();
+
+    let plan = reel_core::plan_reclaim(&c, Some((a, a)), true, |_| {}).unwrap();
+    let pano: Vec<_> = plan
+        .files
+        .iter()
+        .filter(|f| f.contains("PANORAMA"))
+        .collect();
+    assert_eq!(
+        pano.len(),
+        1,
+        "only the cleared panorama's frames: {pano:?}"
+    );
+    assert!(pano[0].contains("001_0039"));
+
+    // Once both stitched photos are imported and cleared, both folders go.
+    reel_core::import_window(&c, "kyoto", b, b, |_| {}).unwrap();
+    let plan = reel_core::plan_reclaim(&c, None, true, |_| {}).unwrap();
+    assert_eq!(
+        plan.files.iter().filter(|f| f.contains("PANORAMA")).count(),
+        2
+    );
 }
 
 #[test]
@@ -1539,6 +1624,34 @@ fn marks_round_trip_cut_compatibly() {
 }
 
 #[test]
+fn concurrent_marks_updates_do_not_lose_each_other() {
+    // The player autosaves while a move/delete filters the same marks.tsv; a bare
+    // read-then-write lets the slower side undo the other's change.
+    let d = tempfile::tempdir().unwrap();
+    let trip = make_trip(&d.path().join("Videos"), "trip");
+    let handles: Vec<_> = (0..16)
+        .map(|i| {
+            let dir = trip.clone();
+            std::thread::spawn(move || {
+                reel_core::review::update_marks(&dir, |m| {
+                    m.push(reel_core::Mark {
+                        master: format!("m{i}"),
+                        start: 0.0,
+                        end: 1.0,
+                        label: String::new(),
+                    })
+                })
+                .unwrap();
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    assert_eq!(reel_core::review::read_marks(&trip).len(), 16);
+}
+
+#[test]
 fn read_marks_skips_comments_and_tolerates_missing_label() {
     let d = tempfile::tempdir().unwrap();
     let trip = d.path().join("trip");
@@ -2297,6 +2410,27 @@ fn delete_removes_pulled_footage_locally_and_tombstones() {
         reel_core::review::read_marks(&trip).is_empty(),
         "the mark that pointed at the deleted clip is gone"
     );
+}
+
+#[test]
+fn delete_removes_a_stray_master_at_the_trip_root() {
+    // A master dropped straight into the trip has no owner and no cloud path. It
+    // must still be deletable, and must not be counted as a friend's kept copy.
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    let trip = make_trip(&lib, "bali");
+    let stray = trip.join("DJI_0777.MP4");
+    touch(&stray, 1, 2_000_000, 1_700_000_000);
+
+    let c = cfg(&lib, &state, None);
+    let r = reel_core::delete_clips(&c, &[stray.display().to_string()]).expect("delete ok");
+    assert_eq!(r.deleted, 1);
+    assert_eq!(r.kept_cloud, 0, "a stray is nobody's cloud copy");
+    assert_eq!(r.in_cloud, 0);
+    assert!(r.cloud_ok, "no cloud path, so nothing to fail");
+    assert!(!stray.exists());
 }
 
 #[test]
@@ -3473,6 +3607,62 @@ fn dedup_prune_keeps_canonical_drops_baseline_and_never_tombstones() {
     );
     let base = fs::read_to_string(state.join("synced/2026-05-26_to_06-12.tsv")).unwrap();
     assert!(!base.contains("DJI_0004"), "baseline drops the pruned clip");
+}
+
+#[test]
+fn dedup_prune_carries_the_pruned_copys_cuts_to_the_survivor() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let c = cfg(&lib, &d.path().join("state"), None);
+
+    let sz = 5_000_000usize;
+    let rel = "jaeho/dji/DJI_0004.MP4";
+    touch(&lib.join("party/.reel"), 0, 1, 1);
+    touch(&lib.join("dup/.reel"), 0, 1, 1);
+    touch(&lib.join("party").join(rel), 0xAA, sz, 1_700_000_000);
+    touch(&lib.join("dup").join(rel), 0xAA, sz, 1_700_000_000);
+    // two cuts of the pruned master, one name already taken in the survivor, and
+    // a cut of an unrelated master that must stay where it is
+    let stem = "jaeho__dji__DJI_0004";
+    touch(&lib.join(format!("dup/clips/{stem}_c01.mp4")), 1, 100, 1);
+    touch(
+        &lib.join(format!("dup/clips/{stem}_c02_jump.mp4")),
+        2,
+        100,
+        1,
+    );
+    touch(&lib.join(format!("party/clips/{stem}_c01.mp4")), 3, 100, 1);
+    touch(
+        &lib.join("dup/clips/jaeho__dji__DJI_0009_c01.mp4"),
+        4,
+        100,
+        1,
+    );
+
+    let res = reel_core::dedup::resolve(
+        &c,
+        vec![reel_core::model::DupResolution {
+            keep: dl("party", rel, true, false, sz as u64),
+            remove: vec![dl("dup", rel, true, false, sz as u64)],
+        }],
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(res.removed_local, 1);
+
+    let party = lib.join("party/clips");
+    assert_eq!(
+        fs::read(party.join(format!("{stem}_c01.mp4"))).unwrap()[0],
+        3
+    );
+    assert!(party.join(format!("{stem}_c02_jump.mp4")).is_file());
+    assert_eq!(
+        fs::read(party.join(format!("{stem}_c01__dup.mp4"))).unwrap()[0],
+        1,
+        "a taken name keeps both cuts"
+    );
+    assert!(!lib.join(format!("dup/clips/{stem}_c01.mp4")).exists());
+    assert!(lib.join("dup/clips/jaeho__dji__DJI_0009_c01.mp4").is_file());
 }
 
 #[test]

@@ -7,30 +7,24 @@ use crate::model::{ClipRef, Share, Trip, TripState};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// A trip is a dir under the library holding a `.reel` marker (depth 1 or 2).
+/// A trip is a direct child of the library holding a `.reel` marker.
+///
+/// Depth 1 only. Trips are named by their bare directory name everywhere else —
+/// `lib.join(name)` in every op, `valid_trip` rejecting `/`, and the ledger,
+/// baseline, cloud cache and pending queue all keyed by that name — so a trip
+/// nested at `parent/child` was listed under the name `child`, then failed every
+/// action ("no trip 'child'"), and two nested trips (or one beside a top-level
+/// trip) sharing a child name collided on one set of state files. Listing only
+/// what the ops can address keeps the dashboard honest.
 pub fn trip_dirs(cfg: &Config) -> Vec<PathBuf> {
-    let mut v = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(&cfg.lib) {
-        for e in rd.filter_map(|e| e.ok()) {
-            let p = e.path();
-            if !p.is_dir() {
-                continue;
-            }
-            if p.join(".reel").is_file() {
-                v.push(p.clone());
-            }
-            if let Ok(rd2) = std::fs::read_dir(&p) {
-                for e2 in rd2.filter_map(|e| e.ok()) {
-                    let p2 = e2.path();
-                    if p2.is_dir() && p2.join(".reel").is_file() {
-                        v.push(p2);
-                    }
-                }
-            }
-        }
-    }
+    let mut v: Vec<PathBuf> = std::fs::read_dir(&cfg.lib)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && p.join(".reel").is_file())
+        .collect();
     v.sort();
-    v.dedup();
     v
 }
 

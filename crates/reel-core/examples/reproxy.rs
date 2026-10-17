@@ -25,8 +25,8 @@ fn main() {
     let (mut was, mut now) = (0u64, 0u64);
 
     for dir in reel_core::trips::trip_dirs(&cfg) {
-        // The name `ensure_proxy` wants is the path under the library, which for a
-        // nested trip is `parent/child` — `trip_dirs` finds those at depth 2.
+        // The name `ensure_proxy` wants is the path under the library; `trip_dirs`
+        // only yields direct children, so that is the bare trip name.
         let Some(trip) = dir.strip_prefix(&cfg.lib).ok().and_then(|p| p.to_str()) else {
             continue;
         };

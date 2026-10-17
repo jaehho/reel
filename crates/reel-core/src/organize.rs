@@ -26,7 +26,7 @@ use crate::ledger::Ledger;
 use crate::media::{masters_in, native_proxy_of, rel_stem, under};
 use crate::model::{Mark, MoveResult};
 use crate::rclone;
-use crate::review::{read_marks, write_marks};
+use crate::review::{read_marks, update_marks, write_marks};
 use crate::store::{now_epoch, FileSet, Pending, PendingOp};
 use crate::trips::{set_trip_meta, trip_meta};
 use std::collections::{HashMap, HashSet};
@@ -228,6 +228,40 @@ fn move_cut_clips(src_dir: &Path, dst_dir: &Path, stem: &str) -> usize {
     moved
 }
 
+/// Carry the cut clips derived from a master (`clips/<stem>_c*`) that is going away
+/// (a pruned duplicate) over to the surviving copy's trip, so the deliverables
+/// aren't stranded under a master that no longer exists. Unlike `move_cut_clips`
+/// this never overwrites: a name already taken in the destination is a different
+/// cut of a same-named clip, so the incoming one is kept beside it, suffixed with
+/// its source trip. Returns how many moved.
+pub(crate) fn carry_cuts(src_dir: &Path, dst_dir: &Path, stem: &str, src_trip: &str) -> usize {
+    let prefix = format!("{stem}_c");
+    let Ok(rd) = fs::read_dir(src_dir.join("clips")) else {
+        return 0;
+    };
+    let mut moved = 0;
+    for p in rd.filter_map(|e| e.ok()).map(|e| e.path()) {
+        let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !p.is_file() || !name.starts_with(&prefix) {
+            continue;
+        }
+        let mut dst = dst_dir.join("clips").join(name);
+        if dst.exists() {
+            let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+            let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("mp4");
+            dst = dst_dir
+                .join("clips")
+                .join(format!("{stem}__{src_trip}.{ext}"));
+        }
+        if !dst.exists() && relocate(&p, &dst).is_ok() {
+            moved += 1;
+        }
+    }
+    moved
+}
+
 /// One master queued for a move: where it is, where it's going, and the cloud
 /// bookkeeping needed once its bytes land.
 struct Plan {
@@ -353,6 +387,9 @@ pub fn move_clips(cfg: &Config, masters: &[String], dest: &str) -> Result<MoveRe
 
     // ---- migrate marks: pull moved masters' segments out of each source trip,
     // repoint them, and append to the destination's marks.tsv ----
+    // One lock across the whole migration, so the player's autosave can't land
+    // between the read of a source and its write-back and undo the strip.
+    let marks_guard = crate::store::state_guard();
     let mut dst_marks = read_marks(&dst_dir);
     let before = dst_marks.len();
     let mut stripped: Vec<(PathBuf, Vec<Mark>)> = Vec::new();
@@ -386,6 +423,7 @@ pub fn move_clips(cfg: &Config, masters: &[String], dest: &str) -> Result<MoveRe
     for (src_dir, kept) in &stripped {
         let _ = write_marks(src_dir, kept);
     }
+    drop(marks_guard);
 
     // ---- mirror in the cloud, or drop the destination's share claim ----
     let any_cloud = moved_plans.iter().any(|p| p.needs_cloud);
@@ -534,14 +572,15 @@ pub fn rename_trip(cfg: &Config, old: &str, new: &str) -> Result<MoveResult, Str
     // marks: repoint absolute paths from the old dir to the new one.
     let old_prefix = old_dir.display().to_string();
     let new_prefix = new_dir.display().to_string();
-    let mut marks = read_marks(&new_dir);
-    for m in marks.iter_mut() {
-        if let Some(rest) = m.master.strip_prefix(&old_prefix) {
-            m.master = format!("{new_prefix}{rest}");
+    let mut n_marks = 0;
+    let _ = update_marks(&new_dir, |marks| {
+        for m in marks.iter_mut() {
+            if let Some(rest) = m.master.strip_prefix(&old_prefix) {
+                m.master = format!("{new_prefix}{rest}");
+            }
         }
-    }
-    let n_marks = marks.len();
-    let _ = write_marks(&new_dir, &marks);
+        n_marks = marks.len();
+    });
 
     // baseline + cloud cache ride along as file renames (rows are trip-local).
     let _ = fs::rename(cfg.base_path(old), cfg.base_path(new));

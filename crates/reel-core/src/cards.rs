@@ -29,6 +29,19 @@ pub fn card_roots(cfg: &Config) -> Vec<PathBuf> {
     r.into_iter().filter(|p| p.is_dir()).collect()
 }
 
+/// A session window from the optional `start`/`end` the UI sends: both → that
+/// window, neither → the whole card, and exactly one → an error. `start.zip(end)`
+/// turned a half-specified window into "the whole card", which is a footgun for
+/// the destructive callers (`clear_discarded`, a reclaim): a dropped argument
+/// should fail loudly, not widen the scope.
+pub fn session_window(start: Option<i64>, end: Option<i64>) -> Result<Option<(i64, i64)>, String> {
+    match (start, end) {
+        (Some(s), Some(e)) => Ok(Some((s, e))),
+        (None, None) => Ok(None),
+        _ => Err("half a session window was given (need both start and end)".into()),
+    }
+}
+
 /// `(epoch, path)` for every capture on the card roots, capture-ordered — videos
 /// and photos both, skipping the `PANORAMA/` source-frame subtree (the stitched
 /// panorama sits beside the videos as an ordinary photo). Same walk as

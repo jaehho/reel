@@ -2490,6 +2490,24 @@ function deleteMark(idx) {
   updateFilmstripActive();
   scheduleSave();
 }
+// The selected mark's index, only if it sits on `master`, else -1. Selection
+// outlives clip changes (`[`/`]`, a filmstrip click), so by the time `x`/⌫ lands
+// it can name a mark on a clip that isn't on screen.
+function selectedMarkOn(marks, selected, master) {
+  return selected != null && marks[selected] && marks[selected].master === master ? selected : -1;
+}
+// `x` / ⌫: delete the selected mark, but only the one the user can see on this
+// clip. A selection left on another clip is named, never silently deleted.
+function deleteSelectedMark() {
+  if (P.selected == null || !P.marks[P.selected]) return;
+  const c = curClip();
+  const idx = selectedMarkOn(P.marks, P.selected, c && c.master);
+  if (idx >= 0) return deleteMark(idx);
+  const at = P.clips.findIndex((k) => k.master === P.marks[P.selected].master) + 1;
+  toast(
+    `The selected segment is on clip ${at || "another"} — open it first, or use ✕ in the Marks panel.`
+  );
+}
 function undo() {
   if (P.pendingIn != null) {
     P.pendingIn = null;
@@ -2541,6 +2559,13 @@ function goToMark(idx) {
 function scheduleSave() {
   clearTimeout(P.saveT);
   P.saveT = setTimeout(saveMarks, 350);
+}
+// Land any debounced save before an engine op rewrites marks.tsv itself (move,
+// delete): otherwise the timer fires afterwards with the pre-op list.
+async function flushMarks() {
+  if (P.saveT == null) return;
+  clearTimeout(P.saveT);
+  await saveMarks();
 }
 async function saveMarks() {
   P.saveT = null;
@@ -3123,7 +3148,7 @@ document.addEventListener("keydown", (e) => {
     case "x":
       // sits with ⌫/del: same action, whichever hand is free
       e.preventDefault();
-      if (P.selected != null) deleteMark(P.selected);
+      deleteSelectedMark();
       break;
     case "m":
       toggleMarksPanel();
@@ -3148,7 +3173,7 @@ document.addEventListener("keydown", (e) => {
     case "Backspace":
       e.preventDefault();
       if (e.shiftKey) deleteCurrentClip();
-      else if (P.selected != null) deleteMark(P.selected);
+      else deleteSelectedMark();
       break;
   }
 });
@@ -3469,6 +3494,7 @@ async function moveCurrentClip() {
   const dest = await pickTrip({ title: "Move clip", meta: `${c.name} → another trip`, confirmLabel: "Move", exclude: P.trip });
   if (!dest) return;
   try {
+    await flushMarks();
     const r = await invoke("move_clips", { masters: [c.master], dest });
     if (r.moved > 0) {
       toast(`Moved ${c.name} → ${dest}${r.cloudSynced ? "" : " · re-share needed"}`);
@@ -3491,6 +3517,7 @@ async function deleteCurrentClip() {
   });
   if (!ok) return;
   try {
+    await flushMarks();
     const r = await invoke("delete_clips", { masters: [c.master] });
     toast(deleteSummary(r));
     dropClipFromPlayer(c);
@@ -3851,6 +3878,19 @@ async function orgMoveMasters(masters, dest) {
     toast(String(e));
   }
 }
+// "name (trip)" lines for a delete confirm, so the dialog says *which* clips go —
+// the selection can be scrolled off-screen, and with nothing selected the keyboard
+// falls back to the focused clip, which the user may never have looked at.
+function targetLines(masters, max = 6) {
+  const lines = masters.slice(0, max).map((m) => {
+    const hit = ORG.byMaster.get(m);
+    const name = hit?.clip.name ?? m.split("/").pop();
+    const trip = hit ? ORG.lanes[hit.lane]?.name : "";
+    return `<strong>${esc(name)}</strong>${trip ? ` (${esc(trip)})` : ""}`;
+  });
+  if (masters.length > max) lines.push(`…and ${masters.length - max} more`);
+  return lines.join("<br>");
+}
 async function orgDeleteMasters(masters) {
   if (!masters.length) return;
   const clips = masters.map((m) => ORG.byMaster.get(m)?.clip).filter(Boolean);
@@ -3858,7 +3898,7 @@ async function orgDeleteMasters(masters) {
   const cloud = mineN ? ` ${plural(mineN, "clip")} of yours are erased from the cloud too.` : "";
   const ok = await confirmDanger({
     title: `Delete ${plural(masters.length, "clip")}`,
-    body: `Permanently delete ${plural(masters.length, "clip")}.${cloud} This can't be undone.`,
+    body: `Permanently delete:<br>${targetLines(masters)}<br>${cloud} This can't be undone.`,
     confirmLabel: "Delete forever",
   });
   if (!ok) return;

@@ -22,7 +22,7 @@ use crate::ledger::{Ledger, Tombstones};
 use crate::media::{fileid_of, masters_in, masters_under, native_proxy_of, rel_stem, under};
 use crate::model::{DeleteResult, ReclaimResult};
 use crate::rclone;
-use crate::review::{read_marks, write_marks};
+use crate::review::update_marks;
 use crate::store::{now_epoch, FileSet, Pending, PendingOp};
 use crate::trips::trip_meta;
 use std::collections::HashMap;
@@ -45,9 +45,15 @@ fn trip_of(lib: &Path, master: &Path) -> Option<String> {
 
 /// `(person, "person/camera/base")` for a master under its trip dir — the owner
 /// and the cloud-relative tail used for both the ledger match and the cloud path.
-fn rel_of(master: &Path, trip_dir: &Path) -> Option<(String, String)> {
+/// The owner is `None` for a stray at the trip root, where the first component is
+/// the filename itself: such a clip has no provenance and no cloud path, so it is
+/// deleted locally but never counted as someone's kept cloud copy. (It is still
+/// returned, not dropped — the caller skips what this can't read, which would
+/// make a stray undeletable.)
+fn rel_of(master: &Path, trip_dir: &Path) -> Option<(Option<String>, String)> {
     let rel = master.strip_prefix(trip_dir).ok()?;
-    let person = rel.components().next()?.as_os_str().to_str()?.to_string();
+    let first = rel.components().next()?.as_os_str().to_str()?.to_string();
+    let person = (rel.components().count() > 1).then_some(first);
     Some((person, rel.to_str()?.to_string()))
 }
 
@@ -78,8 +84,8 @@ pub(crate) fn remove_sidecars(master: &Path) {
 struct Doomed {
     path: PathBuf,
     trip: String,
-    person: String,
-    rel: String, // person/camera/base
+    person: Option<String>, // None: a stray at the trip root
+    rel: String,            // person/camera/base
     id: Option<String>,
     bytes: u64,
 }
@@ -132,7 +138,9 @@ pub fn delete_clips(cfg: &Config, masters: &[String]) -> Result<DeleteResult, St
     }
 
     // Check the cloud once, and only if we might touch it (any of your footage).
-    let touches_cloud = doomed.iter().any(|d| d.person == cfg.user);
+    let touches_cloud = doomed
+        .iter()
+        .any(|d| d.person.as_deref() == Some(cfg.user.as_str()));
     let online = touches_cloud && rclone::remote_ok(&cfg.remote).is_ok();
     let remote = cfg.remote.trim_end_matches('/');
 
@@ -160,8 +168,10 @@ pub fn delete_clips(cfg: &Config, masters: &[String]) -> Result<DeleteResult, St
         let stem = rel_stem(&d.path, &trip_dir);
         let _ = std::fs::remove_file(trip_dir.join(".proxies").join(format!("{stem}.mp4")));
 
-        // cloud: your own footage is erased there too; a friend's is left alone.
-        if d.person == cfg.user {
+        // cloud: your own footage is erased there too; a friend's is left alone, and
+        // a stray has no cloud path to touch.
+        let mine = d.person.as_deref() == Some(cfg.user.as_str());
+        if mine {
             if online {
                 if rclone::delete_file(&format!("{remote}/{}/{}", d.trip, d.rel)).unwrap_or(false) {
                     in_cloud += 1;
@@ -171,7 +181,7 @@ pub fn delete_clips(cfg: &Config, masters: &[String]) -> Result<DeleteResult, St
             } else {
                 cloud_ok = false;
             }
-        } else {
+        } else if d.person.is_some() {
             kept_cloud += 1;
         }
 
@@ -189,7 +199,7 @@ pub fn delete_clips(cfg: &Config, masters: &[String]) -> Result<DeleteResult, St
         // "to pull", and `reconcile_all` (the topbar Sync) pulls without asking. The
         // clip you just permanently deleted would silently come back. Left in the
         // baseline it reads as cloud-only ("in cloud"), which sync never re-pulls.
-        if d.person == cfg.user {
+        if mine {
             base_removes
                 .entry(d.trip.clone())
                 .or_default()
@@ -212,11 +222,7 @@ pub fn delete_clips(cfg: &Config, masters: &[String]) -> Result<DeleteResult, St
     // strip marks that pointed at anything we removed
     for (trip, gone) in &removed_by_trip {
         let dir = cfg.lib.join(trip);
-        let kept: Vec<_> = read_marks(&dir)
-            .into_iter()
-            .filter(|m| !gone.contains(&m.master))
-            .collect();
-        let _ = write_marks(&dir, &kept);
+        let _ = update_marks(&dir, |marks| marks.retain(|m| !gone.contains(&m.master)));
     }
 
     // Baseline: deleting your own clip means it should no longer be in the cloud.

@@ -3,7 +3,7 @@
 //! clip after import, since the id is content-addressed.
 
 use crate::config::Config;
-use crate::media::has_ext;
+use crate::media::is_photo;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -29,9 +29,10 @@ pub fn ensure_poster(cfg: &Config, clip: &Path, fileid: &str) -> Option<PathBuf>
     std::fs::create_dir_all(out.parent()?).ok()?;
 
     // A still image (a panorama photo) is a single frame: an input `-ss` — even 0s
-    // — seeks past it and writes nothing, so grab it directly. For video, seek ~1s
-    // in to skip black leader frames, falling back to the very start.
-    let attempts: &[Option<&str>] = if has_ext(clip, &["jpg", "jpeg", "png"]) {
+    // — seeks past it and writes nothing, so grab it directly. Every photo kind
+    // the importer accepts is a still, not just the three common ones. For video,
+    // seek ~1s in to skip black leader frames, falling back to the very start.
+    let attempts: &[Option<&str>] = if is_photo(clip) {
         &[None]
     } else {
         &[Some("1"), Some("0")]
