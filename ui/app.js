@@ -3782,6 +3782,19 @@ async function orgMoveMasters(masters, dest) {
     toast(String(e));
   }
 }
+// "name (trip)" lines for a delete confirm, so the dialog says *which* clips go —
+// the selection can be scrolled off-screen, and with nothing selected the keyboard
+// falls back to the focused clip, which the user may never have looked at.
+function targetLines(masters, max = 6) {
+  const lines = masters.slice(0, max).map((m) => {
+    const hit = ORG.byMaster.get(m);
+    const name = hit?.clip.name ?? m.split("/").pop();
+    const trip = hit ? ORG.lanes[hit.lane]?.name : "";
+    return `<strong>${esc(name)}</strong>${trip ? ` (${esc(trip)})` : ""}`;
+  });
+  if (masters.length > max) lines.push(`…and ${masters.length - max} more`);
+  return lines.join("<br>");
+}
 async function orgDeleteMasters(masters) {
   if (!masters.length) return;
   const clips = masters.map((m) => ORG.byMaster.get(m)?.clip).filter(Boolean);
@@ -3789,7 +3802,7 @@ async function orgDeleteMasters(masters) {
   const cloud = mineN ? ` ${plural(mineN, "clip")} of yours are erased from the cloud too.` : "";
   const ok = await confirmDanger({
     title: `Delete ${plural(masters.length, "clip")}`,
-    body: `Permanently delete ${plural(masters.length, "clip")}.${cloud} This can't be undone.`,
+    body: `Permanently delete:<br>${targetLines(masters)}<br>${cloud} This can't be undone.`,
     confirmLabel: "Delete forever",
   });
   if (!ok) return;
