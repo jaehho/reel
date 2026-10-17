@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -95,6 +95,51 @@ pub(crate) fn sweep_stale_partials(dir: &Path) {
     }
 }
 
+/// Escape a value going into a tab-separated field. A trip name or a filename can
+/// legally contain a tab (a text input accepts one; unlike a newline, a paste
+/// keeps it), and an unescaped tab shifts every field after it: a queued
+/// `purge` of `"bali\tarchive"` reloads as a purge of `"bali"` and wipes an
+/// unrelated trip's cloud subtree. Round-trips through `tsv_unescape`.
+fn tsv_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Inverse of [`tsv_escape`]. An unrecognised escape passes through with its
+/// backslash intact, so a file written before escaping existed still reads back
+/// byte-for-byte.
+fn tsv_unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            Some('\\') => out.push('\\'),
+            Some('t') => out.push('\t'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 /// Wall-clock epoch seconds, for stamping queued ops (informational ordering).
 pub fn now_epoch() -> i64 {
     SystemTime::now()
@@ -124,7 +169,10 @@ impl FileSet {
                 let mut f = line.split('\t');
                 if let Some(rel) = f.next().filter(|r| !r.is_empty()) {
                     let size = f.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-                    files.insert(rel.to_string(), size);
+                    // A rel with an unescaped tab used to load back truncated with
+                    // size 0, so the clip never matched the cloud and was re-pushed
+                    // on every sync, forever.
+                    files.insert(tsv_unescape(rel), size);
                 }
             }
         }
@@ -138,7 +186,7 @@ impl FileSet {
         }
         let mut s = String::new();
         for (rel, size) in &self.files {
-            s.push_str(&format!("{rel}\t{size}\n"));
+            s.push_str(&format!("{}\t{size}\n", tsv_escape(rel)));
         }
         write_atomic(path, &s)
     }
@@ -223,16 +271,16 @@ impl Pending {
                 let when: i64 = f[0].parse().unwrap_or(0);
                 let op = match f[1] {
                     "move" if f.len() >= 5 => PendingOp::Move {
-                        from: f[2].to_string(),
-                        to: f[3].to_string(),
-                        rel: f[4].to_string(),
+                        from: tsv_unescape(f[2]),
+                        to: tsv_unescape(f[3]),
+                        rel: tsv_unescape(f[4]),
                     },
                     "rename" if f.len() >= 4 => PendingOp::Rename {
-                        old: f[2].to_string(),
-                        new: f[3].to_string(),
+                        old: tsv_unescape(f[2]),
+                        new: tsv_unescape(f[3]),
                     },
                     "purge" if f.len() >= 3 => PendingOp::Purge {
-                        trip: f[2].to_string(),
+                        trip: tsv_unescape(f[2]),
                     },
                     _ => continue,
                 };
@@ -249,9 +297,16 @@ impl Pending {
         let mut s = String::new();
         for (when, op) in &self.rows {
             let line = match op {
-                PendingOp::Move { from, to, rel } => format!("{when}\tmove\t{from}\t{to}\t{rel}"),
-                PendingOp::Rename { old, new } => format!("{when}\trename\t{old}\t{new}\t"),
-                PendingOp::Purge { trip } => format!("{when}\tpurge\t{trip}\t\t"),
+                PendingOp::Move { from, to, rel } => format!(
+                    "{when}\tmove\t{}\t{}\t{}",
+                    tsv_escape(from),
+                    tsv_escape(to),
+                    tsv_escape(rel)
+                ),
+                PendingOp::Rename { old, new } => {
+                    format!("{when}\trename\t{}\t{}\t", tsv_escape(old), tsv_escape(new))
+                }
+                PendingOp::Purge { trip } => format!("{when}\tpurge\t{}\t\t", tsv_escape(trip)),
             };
             s.push_str(&line);
             s.push('\n');
@@ -313,10 +368,35 @@ pub fn save_cloud_cache(path: &Path, checked: i64, files: &FileSet) -> io::Resul
 
 /// Write `body` to `path` through a temp sibling + rename, so a reader never sees
 /// a partial file. Mirrors `Ledger::save`.
+///
+/// The temp file is fsynced *before* the rename. Rename alone buys atomicity
+/// against a concurrent reader, not durability against power loss: with delayed
+/// allocation the rename can reach the disk before the data blocks, leaving a
+/// zero-length file. That failure is not cosmetic here — an empty-but-present
+/// baseline still counts as "a baseline exists", which deliberately suppresses the
+/// first-run migration seed, so every archived clip in that trip reads as an
+/// offline-delete zombie and gets offered for cloud deletion. Syncing the parent
+/// directory too is what makes the rename itself durable.
 pub(crate) fn write_atomic(path: &Path, body: &str) -> io::Result<()> {
     let tmp = temp_sibling(path);
-    fs::write(&tmp, body)?;
+    {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(body.as_bytes()).inspect_err(|_| {
+            let _ = fs::remove_file(&tmp);
+        })?;
+        f.sync_all().inspect_err(|_| {
+            let _ = fs::remove_file(&tmp);
+        })?;
+    }
     fs::rename(&tmp, path).inspect_err(|_| {
         let _ = fs::remove_file(&tmp); // don't leave a stray temp behind
-    })
+    })?;
+    // Best-effort: not every filesystem allows opening a directory for sync, and a
+    // failure here costs durability of the rename, not correctness of the content.
+    if let Some(parent) = path.parent() {
+        if let Ok(d) = fs::File::open(parent) {
+            let _ = d.sync_all();
+        }
+    }
+    Ok(())
 }

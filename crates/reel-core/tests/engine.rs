@@ -2457,6 +2457,52 @@ fn sync_env(d: &Path) -> (PathBuf, PathBuf, Config, PathBuf) {
     (lib, cloud, c, trip)
 }
 
+/// A tab in a trip name shifts every field after it. Unescaped, a queued purge of
+/// `bali\tarchive` reloaded as a purge of `bali` — and `reconcile` replays that
+/// against an unrelated trip's cloud subtree.
+#[test]
+fn a_tab_in_a_name_cannot_retarget_a_queued_op() {
+    use reel_core::store::{Pending, PendingOp};
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("pending.tsv");
+
+    let mut q = Pending::default();
+    q.push(
+        1,
+        PendingOp::Purge {
+            trip: "bali\tarchive".into(),
+        },
+    );
+    q.push(
+        2,
+        PendingOp::Move {
+            from: "src".into(),
+            to: "dest\tx".into(),
+            rel: "jaeho/dji/DJI_0001.MP4".into(),
+        },
+    );
+    q.save(&p).unwrap();
+
+    let back = Pending::load(&p);
+    assert_eq!(back.rows.len(), 2, "both ops survive the round trip");
+    assert_eq!(
+        back.rows[0].1,
+        PendingOp::Purge {
+            trip: "bali\tarchive".into()
+        },
+        "a purge still names the trip it was queued for"
+    );
+    assert_eq!(
+        back.rows[1].1,
+        PendingOp::Move {
+            from: "src".into(),
+            to: "dest\tx".into(),
+            rel: "jaeho/dji/DJI_0001.MP4".into(),
+        },
+        "a move's destination and rel don't slide into each other"
+    );
+}
+
 #[test]
 fn store_roundtrips() {
     let d = tempfile::tempdir().unwrap();
