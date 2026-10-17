@@ -997,6 +997,41 @@ fn archives_a_pooled_trip() {
     assert_eq!(list_trips(&c)[0].state, TripState::Archived);
 }
 
+/// Archive only ever *verifies* capture files, so it must only ever delete
+/// directories that hold captures (plus the camera sidecars push excludes and its
+/// own caches). `build_timeline` writes the Kdenlive project into the trip root,
+/// which makes an `audio/` or `renders/` folder beside it the natural way to work
+/// — and the old "everything but clips/" sweep destroyed those with no backup.
+#[test]
+fn archiving_never_frees_a_directory_it_could_not_verify() {
+    if !have_rclone() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (_lib, cloud, c, trip) = sync_env(d.path());
+    // Work that isn't footage, so nothing ever uploaded it.
+    touch(&trip.join("audio/score.wav"), 0x11, 4096, 1_700_000_000);
+    touch(
+        &trip.join("renders/final_v3.mov"),
+        0x22,
+        8192,
+        1_700_000_000,
+    );
+    touch(&cloud.join("bali/jaeho/dji/DJI_0001.MP4"), 1, 2_000_000, 1);
+
+    reel_core::commit_archive(&c, "bali", |_| {}).expect("archive");
+
+    assert!(!trip.join("jaeho").exists(), "verified raw is still freed");
+    assert!(
+        trip.join("audio/score.wav").is_file(),
+        "unverifiable work is not deleted"
+    );
+    assert!(
+        trip.join("renders/final_v3.mov").is_file(),
+        "a render that was never a master is not deleted"
+    );
+}
+
 #[test]
 fn archive_aborts_when_raw_not_in_pool() {
     if !have_rclone() {
