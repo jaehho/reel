@@ -170,6 +170,40 @@ fn move_cut_clips(src_dir: &Path, dst_dir: &Path, stem: &str) -> usize {
     moved
 }
 
+/// Carry the cut clips derived from a master (`clips/<stem>_c*`) that is going away
+/// (a pruned duplicate) over to the surviving copy's trip, so the deliverables
+/// aren't stranded under a master that no longer exists. Unlike `move_cut_clips`
+/// this never overwrites: a name already taken in the destination is a different
+/// cut of a same-named clip, so the incoming one is kept beside it, suffixed with
+/// its source trip. Returns how many moved.
+pub(crate) fn carry_cuts(src_dir: &Path, dst_dir: &Path, stem: &str, src_trip: &str) -> usize {
+    let prefix = format!("{stem}_c");
+    let Ok(rd) = fs::read_dir(src_dir.join("clips")) else {
+        return 0;
+    };
+    let mut moved = 0;
+    for p in rd.filter_map(|e| e.ok()).map(|e| e.path()) {
+        let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !p.is_file() || !name.starts_with(&prefix) {
+            continue;
+        }
+        let mut dst = dst_dir.join("clips").join(name);
+        if dst.exists() {
+            let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+            let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("mp4");
+            dst = dst_dir
+                .join("clips")
+                .join(format!("{stem}__{src_trip}.{ext}"));
+        }
+        if !dst.exists() && relocate(&p, &dst).is_ok() {
+            moved += 1;
+        }
+    }
+    moved
+}
+
 /// One master queued for a move: where it is, where it's going, and the cloud
 /// bookkeeping needed once its bytes land.
 struct Plan {

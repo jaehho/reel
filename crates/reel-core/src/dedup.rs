@@ -321,6 +321,19 @@ pub fn resolve(
                         .join(".proxies")
                         .join(format!("{stem}.mp4")),
                 );
+                // The pruned master's finished cuts live in its trip's clips/;
+                // hand them to the survivor's trip rather than strand them.
+                if keep_local_ok && rm.trip != r.keep.trip {
+                    let keep_dir = cfg.lib.join(&r.keep.trip);
+                    if keep_dir.join(".reel").is_file() {
+                        crate::organize::carry_cuts(
+                            &cfg.lib.join(&rm.trip),
+                            &keep_dir,
+                            &stem,
+                            &rm.trip,
+                        );
+                    }
+                }
                 if let Some(id) = &rm_id {
                     repoints.push((id.clone(), r.keep.trip.clone(), r.keep.rel.clone()));
                 }

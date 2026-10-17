@@ -3229,6 +3229,62 @@ fn dedup_prune_keeps_canonical_drops_baseline_and_never_tombstones() {
 }
 
 #[test]
+fn dedup_prune_carries_the_pruned_copys_cuts_to_the_survivor() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let c = cfg(&lib, &d.path().join("state"), None);
+
+    let sz = 5_000_000usize;
+    let rel = "jaeho/dji/DJI_0004.MP4";
+    touch(&lib.join("party/.reel"), 0, 1, 1);
+    touch(&lib.join("dup/.reel"), 0, 1, 1);
+    touch(&lib.join("party").join(rel), 0xAA, sz, 1_700_000_000);
+    touch(&lib.join("dup").join(rel), 0xAA, sz, 1_700_000_000);
+    // two cuts of the pruned master, one name already taken in the survivor, and
+    // a cut of an unrelated master that must stay where it is
+    let stem = "jaeho__dji__DJI_0004";
+    touch(&lib.join(format!("dup/clips/{stem}_c01.mp4")), 1, 100, 1);
+    touch(
+        &lib.join(format!("dup/clips/{stem}_c02_jump.mp4")),
+        2,
+        100,
+        1,
+    );
+    touch(&lib.join(format!("party/clips/{stem}_c01.mp4")), 3, 100, 1);
+    touch(
+        &lib.join("dup/clips/jaeho__dji__DJI_0009_c01.mp4"),
+        4,
+        100,
+        1,
+    );
+
+    let res = reel_core::dedup::resolve(
+        &c,
+        vec![reel_core::model::DupResolution {
+            keep: dl("party", rel, true, false, sz as u64),
+            remove: vec![dl("dup", rel, true, false, sz as u64)],
+        }],
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(res.removed_local, 1);
+
+    let party = lib.join("party/clips");
+    assert_eq!(
+        fs::read(party.join(format!("{stem}_c01.mp4"))).unwrap()[0],
+        3
+    );
+    assert!(party.join(format!("{stem}_c02_jump.mp4")).is_file());
+    assert_eq!(
+        fs::read(party.join(format!("{stem}_c01__dup.mp4"))).unwrap()[0],
+        1,
+        "a taken name keeps both cuts"
+    );
+    assert!(!lib.join(format!("dup/clips/{stem}_c01.mp4")).exists());
+    assert!(lib.join("dup/clips/jaeho__dji__DJI_0009_c01.mp4").is_file());
+}
+
+#[test]
 fn dedup_prune_wont_delete_when_canonical_unverifiable() {
     let d = tempfile::tempdir().unwrap();
     let lib = d.path().join("Videos");
