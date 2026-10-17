@@ -11,7 +11,7 @@
 //!
 //! The format is MLT XML, which is what a `.kdenlive` file is. Facts below are
 //! load-bearing and were *measured* against MLT 7.40 and Kdenlive 26.04, not
-//! assumed (see `tests/engine.rs` and the notes in TODO.md):
+//! assumed (see `tests/engine.rs` and issues #45-#47):
 //!   - `<entry in= out=>` are **frame numbers into the source**, not timeline
 //!     positions and not seconds.
 //!   - `out` is **inclusive**: a segment spans `out - in + 1` frames.
@@ -274,6 +274,20 @@ fn parse_ratio(s: &str) -> Option<(u32, u32)> {
     (n > 0 && d > 0).then_some((n, d))
 }
 
+/// The *displayed* dimensions, given the coded frame and its rotation metadata. A
+/// quarter-turn — 90 or 270, either sign, from a Display Matrix or the legacy
+/// `rotate` tag — means the picture is portrait even though the stored frame is
+/// landscape. ffmpeg autorotates on decode, so the proxy and every player show the
+/// swapped size; the project profile has to agree or the clip sits letterboxed in a
+/// frame of the wrong orientation.
+pub fn oriented_dims(coded_w: u32, coded_h: u32, rotation: i32) -> (u32, u32) {
+    if rotation.rem_euclid(180) == 90 {
+        (coded_h, coded_w)
+    } else {
+        (coded_w, coded_h)
+    }
+}
+
 /// One ffprobe per master (headers only). Deliberately reads `r_frame_rate`, not
 /// `avg_frame_rate`: real footage is variable-rate (a phone clip here reports
 /// `30/1` base against a `22525/751` average), and the base rate is the timebase
@@ -287,6 +301,16 @@ pub fn probe(master: &Path) -> Option<ProbeInfo> {
             "v:0",
             "-show_entries",
             "stream=width,height,r_frame_rate,sample_aspect_ratio",
+            // Rotation lives out-of-band: a Display Matrix side-datum (modern iPhone
+            // portrait) or the legacy `rotate` tag. Without it the coded frame reads
+            // 1920x1080 and a portrait clip built a landscape project — the sliver-
+            // letterbox `dar()` was written to prevent, arriving another way. ffmpeg
+            // autorotates on decode, so the proxy is already upright; the timeline
+            // has to match by swapping the dimensions here.
+            "-show_entries",
+            "stream_side_data=rotation",
+            "-show_entries",
+            "stream_tags=rotate",
             "-show_entries",
             "format=duration",
             "-of",
@@ -304,11 +328,17 @@ pub fn probe(master: &Path) -> Option<ProbeInfo> {
             .find_map(|l| l.strip_prefix(&format!("{k}=")))
             .map(str::trim)
     };
-    let width: u32 = field("width")?.parse().ok()?;
-    let height: u32 = field("height")?.parse().ok()?;
-    if width == 0 || height == 0 {
+    let coded_w: u32 = field("width")?.parse().ok()?;
+    let coded_h: u32 = field("height")?.parse().ok()?;
+    if coded_w == 0 || coded_h == 0 {
         return None;
     }
+    let rotation: i32 = field("rotation")
+        .or_else(|| field("TAG:rotate"))
+        .or_else(|| field("rotate"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let (width, height) = oriented_dims(coded_w, coded_h, rotation);
     let (fps_num, fps_den) = field("r_frame_rate").and_then(parse_ratio)?;
     // Real cameras report `N/A` here far more often than `1:1`; square pixels is the
     // right reading of "unspecified", not a reason to give up on the clip.
@@ -328,9 +358,21 @@ pub fn probe(master: &Path) -> Option<ProbeInfo> {
     // it may even be conformed away from this clip's own rate (see `conform`).
     // `nb_frames` is skipped for the same reason it always is here: absent or wrong
     // on the variable-rate files this library is full of.
+    //
+    // A container with no duration prints `duration=N/A` and still exits 0, so a
+    // silent `unwrap_or(0.0)` produced a *successful* probe reporting a zero-length
+    // master. Every mark on it then clamped to frame 0 — `length` 1, `in`/`out`
+    // both 0 — and because `seg.frames()` is still 1 the "did we place anything"
+    // guard passed, so the user was told their marks were placed and got a
+    // one-frame project. `media::clip_health` already refuses a non-positive
+    // duration; treat it as an unprobeable master here too, so the clip is counted
+    // as skipped and reported rather than silently ruined.
     let duration: f64 = field("duration")
         .and_then(|d| d.parse().ok())
         .unwrap_or(0.0);
+    if !duration.is_finite() || duration <= 0.0 {
+        return None;
+    }
 
     // A second, cheap probe for an audio stream: whether to lay an audio clip at all.
     let has_audio = Command::new("ffprobe")
@@ -421,12 +463,24 @@ pub fn match_profile(candidates: &[(String, Profile)], want: &Profile) -> Option
 }
 
 /// Parse an MLT profile file (`key=value` lines, as in `/usr/share/mlt-7/profiles`).
+///
+/// **Interlaced profiles are rejected outright.** `Profile` carries no interlace
+/// field — it doesn't need one, because the project this module writes is always
+/// `progressive="1"` — but that also means `atsc_1080i_60` and `atsc_1080p_30`
+/// compare *equal* (both 1920x1080 @ 30/1). The name tie-break then sorted `i`
+/// before `p` and every 1080p30 project got stamped `atsc_1080i_60`, which is the
+/// name Kdenlive actually resolves the project from. Three stock pairs collide
+/// this way (1080 @ 30, 30000/1001 and 25) and the interlaced one won all three.
+/// Filtering at parse keeps the ambiguity out of the candidate set entirely.
 fn parse_profile_file(text: &str) -> Option<Profile> {
     let get = |k: &str| {
         text.lines()
             .find_map(|l| l.strip_prefix(&format!("{k}=")))
             .and_then(|v| v.trim().parse::<u32>().ok())
     };
+    if get("progressive") == Some(0) {
+        return None;
+    }
     Some(Profile {
         width: get("width")?,
         height: get("height")?,

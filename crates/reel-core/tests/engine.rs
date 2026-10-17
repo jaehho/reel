@@ -4320,6 +4320,55 @@ fn the_project_never_claims_a_profile_name_kdenlive_cannot_resolve() {
     assert!(xml.contains(r#"width="3840" height="2160""#));
 }
 
+/// `Profile` has no interlace field, so `atsc_1080i_60` and `atsc_1080p_30` are
+/// equal on every field it compares (1920x1080 @ 30/1) and the name tie-break put
+/// `i` first. The project this module writes is always `progressive="1"`, and
+/// `kdenlive:docproperties.profile` is what Kdenlive actually resolves the project
+/// from — so the commonest format in the library was being stamped 1080i.
+#[test]
+fn the_project_profile_is_never_an_interlaced_stock_name() {
+    use reel_core::timeline::{stock_profile_name, Profile};
+    if !Path::new("/usr/share/mlt-7/profiles").is_dir()
+        && !Path::new("/usr/share/mlt/profiles").is_dir()
+    {
+        eprintln!("no stock MLT profiles installed; skipping");
+        return;
+    }
+    // The three stock geometries where a progressive/interlaced pair collides.
+    for (fps_num, fps_den) in [(30, 1), (30000, 1001), (25, 1)] {
+        let want = Profile {
+            width: 1920,
+            height: 1080,
+            fps_num,
+            fps_den,
+            sar_num: 1,
+            sar_den: 1,
+        };
+        let got = stock_profile_name(&want);
+        if let Some(name) = &got {
+            assert!(
+                !name.contains("1080i"),
+                "{fps_num}/{fps_den} resolved to the interlaced profile {name:?}"
+            );
+        }
+    }
+}
+
+/// Portrait phone footage stores a landscape coded frame plus a rotation datum;
+/// ignoring it built a landscape project around an upright clip.
+#[test]
+fn rotation_metadata_orients_the_frame() {
+    use reel_core::timeline::oriented_dims;
+    // no rotation, and full turns, leave it landscape
+    assert_eq!(oriented_dims(1920, 1080, 0), (1920, 1080));
+    assert_eq!(oriented_dims(1920, 1080, 180), (1920, 1080));
+    assert_eq!(oriented_dims(1920, 1080, -180), (1920, 1080));
+    // a quarter turn either way is portrait
+    assert_eq!(oriented_dims(1920, 1080, 90), (1080, 1920));
+    assert_eq!(oriented_dims(1920, 1080, -90), (1080, 1920));
+    assert_eq!(oriented_dims(1920, 1080, 270), (1080, 1920));
+}
+
 /// `kdenlive:docproperties.profile` must name a profile Kdenlive can resolve, so
 /// the name is looked up in MLT's profile set rather than invented. The matching
 /// rule is exact — a profile that agrees on size but not frame rate would conform
