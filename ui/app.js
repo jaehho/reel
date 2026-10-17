@@ -4756,15 +4756,33 @@ function dedupLoc(c) {
 async function startDedup() {
   if (!dedupData) return;
   const resolutions = [];
+  let localGone = 0;
+  let anyCloud = false;
   for (const g of dedupData.groups) {
     if (!dedupOn[g.key]) continue;
     const keepIdx = dedupPick[g.key] ?? g.suggestedKeep;
-    resolutions.push({
-      keep: dedupLoc(g.copies[keepIdx]),
-      remove: g.copies.filter((_, i) => i !== keepIdx).map(dedupLoc),
-    });
+    const remove = g.copies.filter((_, i) => i !== keepIdx).map(dedupLoc);
+    for (const rm of remove) {
+      if (rm.local) localGone++;
+      if (rm.inCloud) anyCloud = true;
+    }
+    resolutions.push({ keep: dedupLoc(g.copies[keepIdx]), remove });
   }
   if (!resolutions.length) return;
+
+  // Dedup unlinks local masters and deletes your cloud objects — the same weight as
+  // every other destructive path, which all gate on a confirm. This one used to go
+  // straight through on the checkbox state alone.
+  const parts = [];
+  if (localGone) parts.push(`<strong>${localGone}</strong> local ${localGone === 1 ? "copy" : "copies"}`);
+  if (anyCloud) parts.push("cloud copies of your own footage");
+  const scope = parts.length ? parts.join(", plus ") : "the selected duplicates";
+  const ok = await confirmDanger({
+    title: "Prune duplicates",
+    body: `Delete ${scope}. The kept copy is verified present first. This can't be undone.`,
+    confirmLabel: "Prune",
+  });
+  if (!ok) return;
 
   $("#dedup-go").disabled = true;
   $("#dedup-rescan").disabled = true;
