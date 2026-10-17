@@ -440,6 +440,57 @@ fn lists_trips_with_state() {
     assert!(t.contributors.is_empty());
 }
 
+/// The cover's poster id is looked up, never recomputed: hashing ~8 MiB of the
+/// cover per trip made every dashboard refresh cost ~150 ms a trip. A sentinel
+/// id in the ledger can only come back if the file was not read and hashed; a
+/// clip the ledger doesn't know falls back to the stat-based id.
+#[test]
+fn a_trips_cover_id_comes_from_the_ledger_not_a_rehash() {
+    use reel_core::ledger::LedgerRow;
+    use reel_core::media::quick_fileid;
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    let c = cfg(&lib, &state, None);
+
+    let known = lib.join("bali");
+    fs::create_dir_all(&known).unwrap();
+    fs::write(known.join(".reel"), "reel project\n").unwrap();
+    touch(
+        &known.join("jaeho/dji/DJI_0001.MP4"),
+        1,
+        4096,
+        1_700_000_000,
+    );
+    Ledger::update(&c.ledger_path(), |l| {
+        l.upsert(LedgerRow {
+            id: "sentinel-from-ledger".into(),
+            trip: "bali".into(),
+            person: "jaeho".into(),
+            camera: "dji".into(),
+            base: "DJI_0001.MP4".into(),
+            bytes: "4096".into(),
+            captured: "1700000000".into(),
+            imported_at: "0".into(),
+        });
+    })
+    .unwrap();
+
+    let by_hand = lib.join("hanoi");
+    fs::create_dir_all(&by_hand).unwrap();
+    fs::write(by_hand.join(".reel"), "reel project\n").unwrap();
+    let loose = by_hand.join("jaeho/dji/DJI_0002.MP4");
+    touch(&loose, 2, 4096, 1_700_000_100);
+
+    let trips = list_trips(&c);
+    let cover = |name: &str| {
+        let t = trips.iter().find(|t| t.name == name).unwrap();
+        t.cover.as_ref().unwrap().fileid.clone()
+    };
+    assert_eq!(cover("bali"), "sentinel-from-ledger");
+    assert_eq!(cover("hanoi"), quick_fileid(&loose));
+}
+
 /// Cutting is an export, not a stage: a trip reads the same before and after, and
 /// the next step stays Edit either way. It used to flip Marked → Cut, so the card
 /// kept offering `Cut →` as the thing the trip was waiting on and a cut trip
