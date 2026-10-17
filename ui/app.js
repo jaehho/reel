@@ -1625,6 +1625,7 @@ const P = {
   trip: null,
   clips: [],
   marks: [], // every mark in the trip, file order
+  history: [], // undo stack: snapshots of {marks, selected} before each edit
   i: 0, // current clip index
   selected: null, // selected mark index, or null
   pendingIn: null, // a started mark awaiting its end
@@ -1699,6 +1700,7 @@ async function openReview(t) {
     trip: pl.trip,
     clips: pl.clips,
     marks: pl.marks || [],
+    history: [], // undo is per-session; never let it reach across trips
     i: 0,
     selected: null,
     pendingIn: null,
@@ -2250,6 +2252,7 @@ const TRIM_STEP = 0.5;
 function nudgeEdge(edge, dir) {
   const m = P.marks[P.zoneMark];
   if (!m || !video.duration) return;
+  snapshotMarks(`nudge:${P.zoneMark}:${edge}`);
   const step = TRIM_STEP * dir;
   if (edge === 0) m.start = Math.max(0, Math.min(m.end - 0.1, m.start + step));
   else m.end = Math.min(video.duration, Math.max(m.start + 0.1, m.end + step));
@@ -2276,6 +2279,7 @@ function nudgeEdge(edge, dir) {
 function trimLoop(edge) {
   const m = P.marks[P.zoneMark];
   if (!m) return false;
+  snapshotMarks(`trim:${P.zoneMark}:${edge}`);
   const t = video.currentTime || 0;
   if (edge === 0) {
     if (t >= m.end - 0.05) {
@@ -2443,7 +2447,25 @@ function highlight() {
   const t = video.currentTime;
   addMark(c.master, Math.max(0, t - HL_PRE), Math.min(video.duration, t + HL_POST), "hl");
 }
+// Snapshot the current marks before an edit, so `u` can revert *that* edit rather
+// than blindly popping the newest mark. Capped so a long session can't grow it
+// without bound.
+const UNDO_MAX = 100;
+// `coalesceKey` folds a continuous gesture — holding ctrl+→ to walk an edge fires
+// many small nudges — into a single undo entry: repeated calls with the same key
+// keep only the pre-gesture snapshot. A discrete edit (add/delete) passes no key,
+// which also resets the run so the next gesture starts a fresh entry.
+function snapshotMarks(coalesceKey) {
+  if (coalesceKey != null && P.history.length && P._undoKey === coalesceKey) return;
+  P.history.push({
+    marks: P.marks.map((m) => ({ ...m })),
+    selected: P.selected,
+  });
+  P._undoKey = coalesceKey ?? null;
+  if (P.history.length > UNDO_MAX) P.history.shift();
+}
 function addMark(master, start, end, label) {
+  snapshotMarks();
   P.marks.push({ master, start, end, label });
   P.selected = P.marks.length - 1;
   renderMarks();
@@ -2452,9 +2474,17 @@ function addMark(master, start, end, label) {
   scheduleSave();
 }
 function deleteMark(idx) {
+  snapshotMarks();
   P.marks.splice(idx, 1);
   if (P.selected === idx) P.selected = null;
   else if (P.selected != null && P.selected > idx) P.selected--;
+  // A zone loop pinned to this index now points at a different mark (or past the
+  // end); drop it so a trim key can't edit a bystander. See nudgeEdge.
+  if (P.zoneMark != null && (P.zoneMark === idx || P.zoneMark >= P.marks.length)) {
+    clearZone();
+  } else if (P.zoneMark != null && P.zoneMark > idx) {
+    P.zoneMark--;
+  }
   renderMarks();
   renderScrubMarks();
   updateFilmstripActive();
@@ -2467,9 +2497,13 @@ function undo() {
     armPending(false);
     return;
   }
-  if (!P.marks.length) return;
-  P.marks.pop();
-  P.selected = null;
+  const prev = P.history.pop();
+  if (!prev) return; // nothing to undo
+  P.marks = prev.marks;
+  P.selected = prev.selected;
+  // Any running zone loop indexed into the old array; clear it rather than risk
+  // trimming the wrong mark.
+  if (P.zoneMark != null) clearZone();
   renderMarks();
   renderScrubMarks();
   updateFilmstripActive();
@@ -2578,8 +2612,12 @@ function renderMarks() {
       }
     });
     label.addEventListener("change", () => {
-      P.marks[idx].label = label.value.trim();
-      scheduleSave();
+      const next = label.value.trim();
+      if (P.marks[idx] && P.marks[idx].label !== next) {
+        snapshotMarks();
+        P.marks[idx].label = next;
+        scheduleSave();
+      }
     });
 
     const del = el("button", "mark-del", "✕");
@@ -3434,7 +3472,7 @@ async function moveCurrentClip() {
     const r = await invoke("move_clips", { masters: [c.master], dest });
     if (r.moved > 0) {
       toast(`Moved ${c.name} → ${dest}${r.cloudSynced ? "" : " · re-share needed"}`);
-      dropClipFromPlayer(P.i);
+      dropClipFromPlayer(c);
     } else toast(r.skipped ? `Already in ${dest}` : "Nothing moved.");
   } catch (e) {
     toast(String(e));
@@ -3455,23 +3493,38 @@ async function deleteCurrentClip() {
   try {
     const r = await invoke("delete_clips", { masters: [c.master] });
     toast(deleteSummary(r));
-    dropClipFromPlayer(P.i);
+    dropClipFromPlayer(c);
   } catch (e) {
     toast(String(e));
   }
 }
 // After a clip moves or is deleted, drop it from the open player and keep the
 // in-memory marks/filmstrip matching what the engine left on disk for this trip.
-function dropClipFromPlayer(i) {
-  const gone = P.clips[i];
-  if (!gone) return;
+// Keyed by the clip's identity, never by `P.i`: playback keeps running under the
+// confirm dialog (a modal makes the page inert for input but doesn't pause media),
+// so `ended` can auto-advance and shift `P.i` between the invoke and this call.
+// Dropping the wrong index deletes a bystander clip's marks — and `save_marks`
+// then persists the whole truncated list.
+function dropClipFromPlayer(gone) {
+  const i = P.clips.findIndex((c) => c.master === gone.master);
+  if (i < 0) return;
+  const wasCurrent = P.i === i;
+  const currentMaster = P.clips[P.i]?.master; // remember what's on screen
   P.marks = P.marks.filter((m) => m.master !== gone.master);
   P.clips.splice(i, 1);
   P.selected = null;
   if (!P.clips.length) return closeReview();
   renderFilmstrip();
   renderMarks();
-  loadClip(Math.min(i, P.clips.length - 1), null, 1);
+  if (wasCurrent) {
+    // The clip on screen is the one that left — load its neighbour.
+    loadClip(Math.min(i, P.clips.length - 1), null, 1);
+  } else {
+    // A different clip left; keep the current one on screen, just fix its index.
+    const at = P.clips.findIndex((c) => c.master === currentMaster);
+    P.i = at < 0 ? Math.min(P.i, P.clips.length - 1) : at;
+    updateFilmstripActive();
+  }
 }
 $("#player-menu").addEventListener("click", (e) => {
   e.stopPropagation();
