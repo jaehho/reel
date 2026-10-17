@@ -2,7 +2,7 @@
 
 use crate::config::Config;
 use crate::ledger::Ledger;
-use crate::media::{captured_at, fileid_of, masters_in};
+use crate::media::{captured_at, masters_in};
 use crate::model::{ClipRef, Share, Trip, TripState};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -200,6 +200,36 @@ fn archived_face(ledger: &Ledger, name: &str) -> (Option<ClipRef>, Option<i64>, 
     (cover, start, end)
 }
 
+/// The cover clip's poster-cache key. The poster cache is keyed by the content id,
+/// so an imported clip's cover reuses a poster already built for its card preview —
+/// hence the ledger lookup first (a lookup, no I/O). When the ledger doesn't know
+/// the clip (footage dropped in by hand, or imported by the old script), fall back
+/// to the cheap stat-based `quick_fileid` rather than `fileid_of`: reading and
+/// SHA-1ing 8 MiB per trip was ~150 ms each and the whole cost of a dashboard
+/// refresh at nine trips. A poster keyed by `quick_fileid` just regenerates once if
+/// the file is renamed or replaced, which for a cover thumbnail is free.
+fn cover_fileid(trip_dir: &Path, master: &Path, ledger: &Ledger) -> Option<String> {
+    if let (Ok(rel), Some(trip)) = (
+        master.strip_prefix(trip_dir),
+        trip_dir.file_name().and_then(|s| s.to_str()),
+    ) {
+        let comps: Vec<&str> = rel
+            .components()
+            .filter_map(|c| c.as_os_str().to_str())
+            .collect();
+        // <person>/<camera>/<base> or <person>/<base> (a friend's pulled clip).
+        let hit = match comps.as_slice() {
+            [person, camera, base] => ledger.id_at(trip, person, camera, base),
+            [person, base] => ledger.id_at(trip, person, "", base),
+            _ => None,
+        };
+        if let Some(id) = hit {
+            return Some(id.to_string());
+        }
+    }
+    Some(crate::media::quick_fileid(master))
+}
+
 fn build_trip(cfg: &Config, dir: &Path, ledger: &Ledger) -> Trip {
     let me = cfg.user.as_str();
     let name = dir
@@ -240,7 +270,7 @@ fn build_trip(cfg: &Config, dir: &Path, ledger: &Ledger) -> Trip {
         .and_then(|p| {
             Some(ClipRef {
                 path: p.display().to_string(),
-                fileid: fileid_of(p).ok()?,
+                fileid: cover_fileid(dir, p, ledger)?,
             })
         });
     // Capture window straight from the footage: masters are capture-ordered, so

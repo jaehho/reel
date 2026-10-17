@@ -67,6 +67,17 @@ impl Ledger {
         self.rows.iter().find(|r| r.id == id)
     }
 
+    /// The content id recorded for a clip at `<trip>/<person>/<camera>/<base>`, if
+    /// it was imported. Lets the dashboard resolve a cover's poster (cache keyed by
+    /// this id) without reading and hashing ~8 MiB off disk per trip on every
+    /// refresh — the ledger already holds the same content-addressed id.
+    pub fn id_at(&self, trip: &str, person: &str, camera: &str, base: &str) -> Option<&str> {
+        self.rows
+            .iter()
+            .find(|r| r.trip == trip && r.person == person && r.camera == camera && r.base == base)
+            .map(|r| r.id.as_str())
+    }
+
     /// Insert or replace the row for a content id (upsert by id), so re-importing
     /// the same clip updates its owner rather than duplicating it.
     pub fn upsert(&mut self, row: LedgerRow) {
