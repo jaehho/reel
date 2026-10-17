@@ -2243,6 +2243,27 @@ fn delete_removes_pulled_footage_locally_and_tombstones() {
 }
 
 #[test]
+fn delete_removes_a_stray_master_at_the_trip_root() {
+    // A master dropped straight into the trip has no owner and no cloud path. It
+    // must still be deletable, and must not be counted as a friend's kept copy.
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    let trip = make_trip(&lib, "bali");
+    let stray = trip.join("DJI_0777.MP4");
+    touch(&stray, 1, 2_000_000, 1_700_000_000);
+
+    let c = cfg(&lib, &state, None);
+    let r = reel_core::delete_clips(&c, &[stray.display().to_string()]).expect("delete ok");
+    assert_eq!(r.deleted, 1);
+    assert_eq!(r.kept_cloud, 0, "a stray is nobody's cloud copy");
+    assert_eq!(r.in_cloud, 0);
+    assert!(r.cloud_ok, "no cloud path, so nothing to fail");
+    assert!(!stray.exists());
+}
+
+#[test]
 fn delete_your_footage_offline_owes_pool_cleanup() {
     let d = tempfile::tempdir().unwrap();
     let lib = d.path().join("Videos");
