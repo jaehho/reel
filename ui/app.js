@@ -3982,7 +3982,12 @@ document.addEventListener("keydown", orgKey);
 
 // ============================ pull from cloud ============================
 const pullDlg = $("#pull-dialog");
+// Same stale-response guard as the Sync panel: `cloud_contributors` is a live
+// listing, so reopening on another trip mid-fetch must not append trip A's
+// contributors under trip B (each row's button closes over the old trip).
+let pullGen = 0;
 async function openPull(t) {
+  const gen = ++pullGen;
   $("#pull-title").textContent = `Pull into ${t.name}`;
   $("#pull-meta").textContent = "Checking the cloud…";
   $("#pull-list").innerHTML = "";
@@ -3992,12 +3997,13 @@ async function openPull(t) {
   try {
     people = await invoke("cloud_contributors", { trip: t.name });
   } catch (e) {
+    if (gen !== pullGen || !pullDlg.open) return;
     $("#pull-meta").textContent = "";
     $("#pull-error").textContent = String(e);
     $("#pull-error").hidden = false;
     return;
   }
-  if (!pullDlg.open) return;
+  if (gen !== pullGen || !pullDlg.open) return;
   if (!people.length) {
     $("#pull-meta").textContent = "No one else has shared footage to this trip yet.";
     return;
@@ -4387,6 +4393,12 @@ const syncDlg = $("#sync-dialog");
 let syncTrip = null;
 let syncData = null;
 let syncActions = {};
+// Bumped every time the panel targets a new trip. `sync_status(refresh:true)` is a
+// live rclone listing whose latency tracks trip size, so a slow fetch for trip A
+// can land after the user closed it and reopened on trip B — and B's Sync button
+// would then act on A's drift. A response whose generation no longer matches is
+// stale and dropped.
+let syncGen = 0;
 
 // Each drift bucket: a short chip label naming what the clips *are*, the chip
 // colour, the reconcile action it enables (null = surfaced only, never
@@ -4458,6 +4470,7 @@ let syncPreselect = null;
 async function openSync(t, preselect = null) {
   syncTrip = t;
   syncData = null;
+  syncGen++;
   syncPreselect = preselect;
   $("#sync-title").textContent = `Sync ${t.name}`;
   $("#sync-meta").textContent = "Checking the cloud…";
@@ -4471,18 +4484,25 @@ async function openSync(t, preselect = null) {
 
 async function refreshSync() {
   if (!syncTrip) return;
+  const gen = syncGen;
+  const trip = syncTrip.name;
   $("#sync-refresh").disabled = true;
   $("#sync-error").hidden = true;
+  let data;
   try {
-    syncData = await invoke("sync_status", { trip: syncTrip.name, refresh: true });
+    data = await invoke("sync_status", { trip, refresh: true });
   } catch (e) {
+    if (gen !== syncGen || !syncDlg.open) return; // a newer trip owns the panel now
     $("#sync-meta").textContent = "";
     $("#sync-error").textContent = String(e);
     $("#sync-error").hidden = false;
     $("#sync-refresh").disabled = false;
     return;
   }
-  if (!syncDlg.open) return;
+  // Drop a listing that finished after the panel moved on, so trip B never renders
+  // (or acts on) trip A's drift.
+  if (gen !== syncGen || !syncDlg.open) return;
+  syncData = data;
   $("#sync-refresh").disabled = false;
   renderSync();
 }
