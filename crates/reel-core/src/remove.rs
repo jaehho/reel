@@ -231,6 +231,17 @@ pub fn delete_clips(cfg: &Config, masters: &[String]) -> Result<DeleteResult, St
         });
     }
 
+    if deleted > 0 || in_cloud > 0 {
+        crate::log::event(
+            crate::log::Level::Warn,
+            "engine",
+            "delete_clips",
+            Some(serde_json::json!({
+                "deleted": deleted, "bytes": bytes,
+                "cloud_removed": in_cloud, "kept_cloud": kept_cloud, "cloud_ok": cloud_ok,
+            })),
+        );
+    }
     Ok(DeleteResult {
         deleted,
         bytes,
@@ -323,6 +334,27 @@ pub fn delete_trip(cfg: &Config, trip: &str) -> Result<DeleteResult, String> {
         }
     }
 
+    // Drop any queued op that still names this now-deleted trip. A Move *into* it
+    // would otherwise replay and recreate the clip in the cloud under a trip that no
+    // longer exists (an orphan); a Move *out of* it is subsumed by the purge above.
+    // Done after the purge push so that push isn't itself dropped.
+    let _ = Pending::update(&cfg.pending_path(), |p| {
+        p.rows.retain(|(_, op)| match op {
+            PendingOp::Move { from, to, .. } => from != trip && to != trip,
+            PendingOp::Rename { old, new } => old != trip && new != trip,
+            PendingOp::Purge { .. } => true, // keep our own purge
+        })
+    });
+
+    crate::log::event(
+        crate::log::Level::Warn,
+        "engine",
+        "delete_trip",
+        Some(serde_json::json!({
+            "trip": trip, "masters": masters, "bytes": bytes,
+            "cloud_purged": in_cloud, "cloud_ok": cloud_ok,
+        })),
+    );
     Ok(DeleteResult {
         deleted: masters,
         bytes,

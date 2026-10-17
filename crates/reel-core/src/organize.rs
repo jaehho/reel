@@ -29,7 +29,7 @@ use crate::rclone;
 use crate::review::{read_marks, write_marks};
 use crate::store::{now_epoch, FileSet, Pending, PendingOp};
 use crate::trips::{set_trip_meta, trip_meta};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -96,9 +96,61 @@ fn owner_and_subdir(master: &Path, trip_dir: &Path) -> Option<(String, String)> 
     Some((owner, dir.to_str()?.replace('\\', "/")))
 }
 
+/// The trip-relative path a ledger row names. Built the way `owner_and_subdir`
+/// derives `rel`, which means skipping an absent camera level instead of emitting
+/// an empty component: a friend's footage pulled as `alice/CLIP.MP4` has
+/// `camera == ""`, and the old three-level `format!` produced `alice//CLIP.MP4`
+/// — matching nothing, so the files moved and the ledger silently didn't follow.
+/// A later `delete_trip` on the source would then tombstone that clip's content id
+/// and make it un-reimportable.
+fn row_rel(person: &str, camera: &str, base: &str) -> String {
+    if camera.is_empty() {
+        format!("{person}/{base}")
+    } else {
+        format!("{person}/{camera}/{base}")
+    }
+}
+
+/// Rewrite every queued op that names `old` to name `new`, so a rename (or a
+/// delete, via the `remove` module) doesn't strand an op pointing at a trip that no
+/// longer exists. Covers a Move's source *and* destination, a Rename's endpoints,
+/// and a Purge.
+fn retarget_pending(p: &mut Pending, old: &str, new: &str) {
+    for (_, op) in p.rows.iter_mut() {
+        match op {
+            PendingOp::Move { from, to, .. } => {
+                if from == old {
+                    *from = new.to_string();
+                }
+                if to == old {
+                    *to = new.to_string();
+                }
+            }
+            PendingOp::Rename { old: o, new: n } => {
+                if o == old {
+                    *o = new.to_string();
+                }
+                if n == old {
+                    *n = new.to_string();
+                }
+            }
+            PendingOp::Purge { trip } => {
+                if trip == old {
+                    *trip = new.to_string();
+                }
+            }
+        }
+    }
+}
+
 /// Move a file, preferring a rename (same filesystem — the whole library is one
 /// tree) and falling back to copy+remove across devices, preserving mtime so the
 /// clip's capture time survives.
+///
+/// The fallback copies through a unique temp sibling rather than straight to
+/// `dst`: a copy that dies partway (full disk, unplugged drive) would otherwise
+/// leave a truncated master sitting at the destination, and the next attempt reads
+/// that as "the destination already owns this clip" and skips it forever.
 fn relocate(src: &Path, dst: &Path) -> io::Result<()> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
@@ -106,12 +158,18 @@ fn relocate(src: &Path, dst: &Path) -> io::Result<()> {
     if fs::rename(src, dst).is_ok() {
         return Ok(());
     }
-    fs::copy(src, dst)?;
+    let tmp = crate::store::temp_sibling(dst);
+    fs::copy(src, &tmp).inspect_err(|_| {
+        let _ = fs::remove_file(&tmp);
+    })?;
     if let Ok(mt) = fs::metadata(src).and_then(|m| m.modified()) {
-        if let Ok(f) = File::options().write(true).open(dst) {
+        if let Ok(f) = File::options().write(true).open(&tmp) {
             let _ = f.set_modified(mt);
         }
     }
+    fs::rename(&tmp, dst).inspect_err(|_| {
+        let _ = fs::remove_file(&tmp);
+    })?;
     fs::remove_file(src)
 }
 
@@ -197,6 +255,14 @@ pub fn move_clips(cfg: &Config, masters: &[String], dest: &str) -> Result<MoveRe
     // ---- plan every move up front (no disk changes yet) ----
     let mut plans: Vec<Plan> = Vec::new();
     let mut skipped = 0usize;
+    // Destinations already spoken for by an earlier plan. The `exists()` check
+    // below only sees the filesystem, and nothing is written until the move loop —
+    // so two selected masters that resolve to the same `<subdir>/<base>` (the same
+    // camera filename in two different trips, exactly what `dedup` exists to
+    // surface) would both pass it, and `relocate`'s `fs::rename` would silently
+    // replace the first with the second. One clip's bytes gone, reported as
+    // "moved 2", and two content ids left pointing at one file.
+    let mut claimed: HashSet<PathBuf> = HashSet::new();
     for m in masters {
         let src = PathBuf::from(m);
         if !under(&src, &cfg.lib) || !src.is_file() {
@@ -216,8 +282,8 @@ pub fn move_clips(cfg: &Config, masters: &[String], dest: &str) -> Result<MoveRe
         let base = src.file_name().and_then(|s| s.to_str()).unwrap_or_default();
         let rel = format!("{subdir}/{base}");
         let master_dst = dst_dir.join(&subdir).join(base);
-        if master_dst.exists() {
-            skipped += 1; // the destination already owns this clip
+        if master_dst.exists() || !claimed.insert(master_dst.clone()) {
+            skipped += 1; // the destination already owns this clip, or a peer claimed it
             continue;
         }
         let needs_cloud = person != cfg.user || is_shared(&src_dir);
@@ -274,9 +340,11 @@ pub fn move_clips(cfg: &Config, masters: &[String], dest: &str) -> Result<MoveRe
     }
     Ledger::update(&cfg.ledger_path(), |l| {
         for (src_trip, rel) in &repoint {
-            if let Some(row) = l.rows.iter_mut().find(|r| {
-                &r.trip == src_trip && rel == &format!("{}/{}/{}", r.person, r.camera, r.base)
-            }) {
+            if let Some(row) = l
+                .rows
+                .iter_mut()
+                .find(|r| &r.trip == src_trip && rel == &row_rel(&r.person, &r.camera, &r.base))
+            {
                 row.trip = dest.to_string();
             }
         }
@@ -287,6 +355,7 @@ pub fn move_clips(cfg: &Config, masters: &[String], dest: &str) -> Result<MoveRe
     // repoint them, and append to the destination's marks.tsv ----
     let mut dst_marks = read_marks(&dst_dir);
     let before = dst_marks.len();
+    let mut stripped: Vec<(PathBuf, Vec<Mark>)> = Vec::new();
     for (src_dir, pairs) in &migrations {
         let mut kept = read_marks(src_dir);
         kept.retain(|m| {
@@ -302,11 +371,20 @@ pub fn move_clips(cfg: &Config, masters: &[String], dest: &str) -> Result<MoveRe
                 true
             }
         });
-        let _ = write_marks(src_dir, &kept);
+        stripped.push((src_dir.clone(), kept));
     }
     let marks = dst_marks.len() - before;
+    // Publish the destination before stripping the sources, and surface a failure
+    // instead of swallowing it. Marks are the only work the user authors by hand;
+    // stripping first meant a destination write that failed (full disk, read-only
+    // mount) destroyed the in/out points and still reported success.
     if marks > 0 {
-        let _ = write_marks(&dst_dir, &dst_marks);
+        write_marks(&dst_dir, &dst_marks).map_err(|e| {
+            format!("moved the files, but couldn't write '{dest}' marks — the originals are untouched: {e}")
+        })?;
+    }
+    for (src_dir, kept) in &stripped {
+        let _ = write_marks(src_dir, kept);
     }
 
     // ---- mirror in the cloud, or drop the destination's share claim ----
@@ -340,6 +418,17 @@ pub fn move_clips(cfg: &Config, masters: &[String], dest: &str) -> Result<MoveRe
         }
     }
 
+    if moved > 0 {
+        crate::log::event(
+            crate::log::Level::Info,
+            "engine",
+            "move_clips",
+            Some(serde_json::json!({
+                "dest": dest, "moved": moved, "clips": clips,
+                "marks": marks, "skipped": skipped, "cloud_synced": cloud_synced,
+            })),
+        );
+    }
     Ok(MoveResult {
         dest: dest.to_string(),
         moved,
@@ -458,15 +547,24 @@ pub fn rename_trip(cfg: &Config, old: &str, new: &str) -> Result<MoveResult, Str
     let _ = fs::rename(cfg.base_path(old), cfg.base_path(new));
     let _ = fs::rename(cfg.cloud_cache_path(old), cfg.cloud_cache_path(new));
 
+    // Any queued op still naming the old trip has to follow the rename, or it
+    // replays against a trip that no longer exists — a queued Move *into* this trip
+    // would land the clip under the old name in the cloud (an orphan) while the
+    // footage lives under the new one.
+    let _ = Pending::update(&cfg.pending_path(), |p| retarget_pending(p, old, new));
+
     // cloud: move only YOUR subtree `<old>/<user>` → `<new>/<user>`, so a rename
     // never drags other contributors' footage with it. Offline, queue it.
     let mut cloud_synced = true;
     if needs_cloud {
         let remote = cfg.remote.trim_end_matches('/');
+        // Without a usable user this moves `<old>/` wholesale — every
+        // contributor's footage, which is exactly what scoping exists to prevent.
+        let me = cfg.user_scope()?;
         cloud_synced = rclone::remote_ok(&cfg.remote).is_ok()
             && rclone::move_path(
-                &format!("{remote}/{old}/{}", cfg.user),
-                &format!("{remote}/{new}/{}", cfg.user),
+                &format!("{remote}/{old}/{me}"),
+                &format!("{remote}/{new}/{me}"),
             )
             .unwrap_or(false);
         if !cloud_synced {
@@ -522,10 +620,80 @@ pub fn merge_trips(cfg: &Config, src: &str, dst: &str) -> Result<MoveResult, Str
 
     let result = move_clips(cfg, &masters, dst)?;
 
-    // Fold the emptied source away: once no masters remain, drop its now-empty
-    // marks/proxies and the directory itself (its share proof left with the raw).
+    // Fold the emptied source away — but "no masters" is not "nothing of value".
+    // `masters_in` deliberately skips `clips/`, `_sheets/` and `.proxies/`, so a
+    // finished cut whose master was deleted earlier (a supported flow — `remove`
+    // promises it "leaves finished clips alone") lives *only* under `clips/`, and
+    // `move_cut_clips` only carries cuts whose master moved. Deleting on the
+    // masters-only test destroyed exactly the deliverables the rest of the code
+    // goes out of its way to preserve. Carry the orphans over first; keep the
+    // directory if anything irreplaceable is still in it.
     if masters_in(&src_dir).is_empty() {
-        let _ = fs::remove_dir_all(&src_dir);
+        carry_orphan_cuts(&src_dir, &cfg.lib.join(dst), src);
+        if !holds_originals(&src_dir) {
+            let _ = fs::remove_dir_all(&src_dir);
+        }
     }
+    crate::log::event(
+        crate::log::Level::Info,
+        "engine",
+        "merge_trips",
+        Some(serde_json::json!({
+            "src": src, "dst": dst, "moved": result.moved,
+            "src_removed": !src_dir.exists(),
+        })),
+    );
     Ok(result)
+}
+
+/// Move cuts left in `src_dir/clips` — the ones whose master is already gone, so
+/// `move_cut_clips` never saw them — into the destination's `clips/`. Suffixed
+/// with the source trip name on a collision, since two trips can hold cuts of the
+/// same stem.
+fn carry_orphan_cuts(src_dir: &Path, dst_dir: &Path, src_trip: &str) {
+    let Ok(rd) = fs::read_dir(src_dir.join("clips")) else {
+        return;
+    };
+    for e in rd.filter_map(|e| e.ok()) {
+        let p = e.path();
+        if !p.is_file() {
+            continue;
+        }
+        let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let mut dst = dst_dir.join("clips").join(name);
+        if dst.exists() {
+            let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+            let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("mp4");
+            dst = dst_dir
+                .join("clips")
+                .join(format!("{stem}__{src_trip}.{ext}"));
+        }
+        if !dst.exists() {
+            let _ = relocate(&p, &dst);
+        }
+    }
+}
+
+/// Does this trip still hold something that can't be rebuilt? Caches
+/// (`.proxies/`, `_sheets/`), the `.reel` marker, `marks.tsv` (already migrated)
+/// and a `.kdenlive` project (regenerated from marks on demand) are all
+/// disposable; anything else is the user's and blocks the fold-away.
+fn holds_originals(dir: &Path) -> bool {
+    walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .any(|e| {
+            let p = e.path();
+            let rel = p.strip_prefix(dir).unwrap_or(p);
+            let derived = rel
+                .components()
+                .any(|c| matches!(c.as_os_str().to_str(), Some(".proxies") | Some("_sheets")));
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            let meta = matches!(name, ".reel" | "marks.tsv")
+                || p.extension().and_then(|s| s.to_str()) == Some("kdenlive");
+            !derived && !meta
+        })
 }

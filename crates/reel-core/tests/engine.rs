@@ -2143,6 +2143,82 @@ fn merge_folds_source_into_dest() {
     );
 }
 
+/// Two selected masters can carry the same `<person>/<camera>/<base>` — the same
+/// camera filename in two trips is exactly what `dedup` exists to surface. They
+/// resolve to one destination path, and nothing is on disk there when the plan is
+/// built, so a filesystem-only collision check passes both and `fs::rename`
+/// silently replaces the first with the second.
+#[test]
+fn two_sources_never_collapse_onto_one_destination_path() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    make_trip(&lib, "a");
+    make_trip(&lib, "c");
+    make_trip(&lib, "b");
+
+    // Same name, same relative subdir, different bytes and different length.
+    let from_a = lib.join("a/jaeho/dji/DJI_0001.MP4");
+    let from_c = lib.join("c/jaeho/dji/DJI_0001.MP4");
+    touch(&from_a, 1, 1_000_000, 1_700_000_000);
+    touch(&from_c, 2, 2_000_000, 1_700_000_300);
+
+    let c = cfg(&lib, &state, None);
+    let r = reel_core::move_clips(
+        &c,
+        &[from_a.display().to_string(), from_c.display().to_string()],
+        "b",
+    )
+    .expect("move ok");
+
+    assert_eq!(r.moved, 1, "only one clip can occupy the destination path");
+    assert_eq!(r.skipped, 1, "the loser is reported, not silently dropped");
+    // Whichever won, the other's bytes must still exist somewhere.
+    let landed = lib.join("b/jaeho/dji/DJI_0001.MP4");
+    assert!(landed.is_file());
+    assert!(
+        from_a.is_file() || from_c.is_file(),
+        "the clip that lost the race is left where it was, never overwritten"
+    );
+    let survivors = [&from_a, &from_c].iter().filter(|p| p.is_file()).count();
+    assert_eq!(survivors, 1, "exactly one source moved");
+}
+
+/// `masters_in` skips `clips/`, so "no masters left" is not "nothing of value
+/// left": a cut whose master was deleted earlier lives only under `clips/`.
+#[test]
+fn merging_carries_orphan_cuts_instead_of_deleting_them() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    make_trip(&lib, "a");
+    make_trip(&lib, "b");
+
+    let master = lib.join("a/jaeho/dji/DJI_0001.MP4");
+    touch(&master, 1, 2_000_000, 1_700_000_000);
+    // A finished cut whose own master is already gone — nothing links it to a
+    // moving master, so `move_cut_clips` never sees it.
+    let orphan = lib.join("a/clips/jaeho__dji__DJI_0009_c01_hero.mp4");
+    touch(&orphan, 7, 4096, 1_700_000_100);
+
+    let c = cfg(&lib, &state, None);
+    reel_core::merge_trips(&c, "a", "b").expect("merge ok");
+
+    let carried = lib.join("b/clips/jaeho__dji__DJI_0009_c01_hero.mp4");
+    assert!(carried.is_file(), "the finished cut came along");
+    assert_eq!(
+        fs::read(&carried).unwrap().len(),
+        4096,
+        "and it's the same file, not a stub"
+    );
+    assert!(
+        !lib.join("a").exists(),
+        "the emptied source still folds away"
+    );
+}
+
 #[test]
 fn moving_shared_footage_offline_unshares_the_dest() {
     let d = tempfile::tempdir().unwrap();
@@ -3216,6 +3292,50 @@ fn offline_rename_queues_and_does_not_offer_reupload() {
         "the old cloud name is gone"
     );
     assert!(reel_core::sync_status(&c, "flores", true).unwrap().in_sync);
+}
+
+/// A queued Move points at its destination trip by name. Rename that destination
+/// and the op must follow, or it replays against a trip that no longer exists and
+/// lands the clip in the cloud under the stale name — an orphan beside the real one.
+#[test]
+fn renaming_a_trip_retargets_a_queued_move_into_it() {
+    use reel_core::store::{Pending, PendingOp};
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    make_trip(&lib, "java");
+    let c = cfg(&lib, &state, None);
+
+    // Stand in for an offline move that couldn't mirror to the cloud yet.
+    Pending::update(&c.pending_path(), |p| {
+        p.push(
+            1,
+            PendingOp::Move {
+                from: "bali".into(),
+                to: "java".into(),
+                rel: "jaeho/dji/DJI_0001.MP4".into(),
+            },
+        );
+    })
+    .unwrap();
+
+    reel_core::rename_trip(&c, "java", "borneo").expect("rename");
+
+    let back = Pending::load(&c.pending_path());
+    let moves: Vec<_> = back
+        .rows
+        .iter()
+        .filter_map(|(_, o)| match o {
+            PendingOp::Move { to, .. } => Some(to.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        moves,
+        vec!["borneo".to_string()],
+        "the queued move now targets the trip's new name, not the vanished one"
+    );
 }
 
 #[test]
