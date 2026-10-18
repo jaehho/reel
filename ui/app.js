@@ -617,7 +617,7 @@ function footActions(t, card) {
     const cut = elHTML("button", "btn small ghost", '<span class="btn-ico" aria-hidden="true">✂</span> Cut');
     cut.type = "button";
     cut.title = t.clips > 0
-      ? `Cut ${t.name}'s new marks into clips (existing ones are left alone)`
+      ? `Cut ${t.name}'s marks into clips (unchanged ones are kept, trimmed ones re-cut, clips with no mark removed)`
       : `Cut ${t.name}'s ${plural(t.marks, "mark")} into standalone clips`;
     cut.onclick = () => startCut(t);
     actions.append(cut);
@@ -990,7 +990,8 @@ function renderShareAll() {
 // ---- cut: write a trip's marked ranges into clips/, progress inline on the card ----
 function cutSummary(r) {
   const bits = [`Cut ${plural(r.made, "clip")}`];
-  if (r.skipped) bits.push(`${r.skipped} already there`);
+  if (r.skipped) bits.push(`${r.skipped} up to date`);
+  if (r.removed) bits.push(`${plural(r.removed, "clip")} removed, no longer marked`);
   if (r.failed) bits.push(`${r.failed} failed`);
   return bits.join(" · ");
 }

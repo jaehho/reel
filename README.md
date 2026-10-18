@@ -69,10 +69,18 @@ The engine honours the same env knobs as the script (`REEL_LIB`, `REEL_REMOTE`,
   cached by content id) before deciding to import.
 - [x] **2 — Cut**: marked ranges → `clips/`, lossless (one ffmpeg stream-copy per
   mark, `-ss/-to` before `-i`, primary v+a only), with live per-clip progress on
-  the trip card. Additive and re-runnable: existing clips are left untouched, so
-  adding marks and cutting again only writes the new ones. **Edit** is the other
-  way out: the trip's marks become one `.kdenlive` timeline against the masters,
-  launched detached. Cut writes standalone files; Edit is where you go to work.
+  the trip card. Re-runnable: `clips/` is brought in line with the marks as they
+  are now. A clip whose mark hasn't changed is left untouched, a trimmed mark is
+  cut again, a relabelled or renumbered one has its clip renamed, and a clip no
+  mark asks for is removed (the toast says how many). Only a clip Cut itself made
+  can go (it keeps `clips/.manifest` to know), only while its master is still on
+  disk, and only after a run where nothing failed; cuts carried in from a pruned
+  duplicate, files you put there, and the finished cuts of a deleted master are
+  never touched. Clips left by versions before the manifest can't be checked:
+  the ones a mark still names are cut once more, the rest stay until you delete them.
+  **Edit** is the other way out: the trip's marks become one `.kdenlive`
+  timeline against the masters, launched detached. Cut writes standalone files;
+  Edit is where you go to work.
 - [x] **3 — Import + session picker + cloud**: card→workspace copy + ledger write,
   then rclone push/verify to the shared cloud. Import is session-scoped with live
   progress, dedup, and capture-time preserved; **Share** uploads your masters,

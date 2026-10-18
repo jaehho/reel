@@ -301,8 +301,9 @@ pub async fn make_proxy(trip: String, master: String) -> Result<String, String> 
 
 /// Cut a trip's marked ranges into `clips/` — one lossless ffmpeg stream-copy per
 /// mark, streaming per-segment progress over `channel`. Runs off the UI thread so
-/// the window stays live; an output that already exists is left as-is, so this is
-/// safe to re-run after adding more marks. `Err` only on a bad trip or no marks.
+/// the window stays live. Safe to re-run: `clips/` is reconciled with the marks as
+/// they are now (unchanged clips kept, trimmed ones re-cut, unmarked ones removed).
+/// `Err` only on a bad trip or no marks.
 #[tauri::command]
 pub async fn cut_trip(channel: Channel<CutProgress>, trip: String) -> Result<CutResult, String> {
     let cfg = Config::from_env();

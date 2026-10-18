@@ -754,15 +754,16 @@ pub struct CutProgress {
     pub count: usize,
 }
 
-/// Summary of a cut: clips newly written, marks skipped because their output was
-/// already there (the cut is additive and re-runnable), marks that failed, and
-/// where the clips landed.
+/// Summary of a cut: clips written, marks whose clip was already right (or only
+/// needed renaming), clips removed because no mark asks for them any more, marks
+/// that failed, and where the clips landed.
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct CutResult {
     pub trip: String,
     pub made: usize,
     pub skipped: usize,
+    pub removed: usize,
     pub failed: usize,
     /// Absolute path of the trip's `clips/` directory.
     pub dir: String,
