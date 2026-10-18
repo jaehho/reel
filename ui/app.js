@@ -2421,8 +2421,23 @@ function seekFromEvent(e) {
 function armPending(on) {
   $("#hint-out")?.classList.toggle("armed", on);
 }
+// i / o / h read the playhead, and until <video> holds the clip on screen (see
+// videoReady) that is the previous clip's: the new clip would get its time. A stub
+// has no timeline and its stage note already says why, so only a clip that is
+// still on its way earns a toast.
+function markReady() {
+  const c = curClip();
+  if (!c || c.stub) return false;
+  if (!videoReady()) {
+    toast("Still loading this clip.");
+    return false;
+  }
+  return !!video.duration;
+}
+// Shortest segment i/o will save. `i` then `o` at one instant is a slip, not a mark.
+const MIN_MARK = 0.1;
 function markIn() {
-  if (!video.duration) return;
+  if (!markReady()) return;
   if (P.zoneLoop && trimLoop(0)) return;
   P.pendingIn = video.currentTime;
   armPending(true);
@@ -2430,22 +2445,39 @@ function markIn() {
 }
 function markOut() {
   const c = curClip();
-  if (!c) return;
+  if (!markReady()) return;
   if (P.zoneLoop && trimLoop(1)) return;
   if (P.pendingIn == null) return toast("Nothing started yet — press i first, or h to keep the last few seconds.");
   let s = P.pendingIn,
     e = video.currentTime;
   if (e < s) [s, e] = [e, s];
+  // The start stays armed, so moving the playhead and pressing `o` again finishes it.
+  if (e - s < MIN_MARK) return toast("Too short — move the playhead and press o again.");
   P.pendingIn = null;
   hidePending();
   armPending(false);
   addMark(c.master, s, e, "");
 }
+// `h` is pressed while a moment is still going on, so a few presses in a row stack
+// near-identical windows (20 presses in a 20 s clip made 20 marks). The latest
+// highlight on this clip that touches [s, e] takes the new window in instead.
+// Only the unlabelled "hl" kind: a mark you've renamed is yours, not a duplicate.
+function highlightToExtend(marks, master, s, e) {
+  for (let i = marks.length - 1; i >= 0; i--) {
+    const m = marks[i];
+    if (m.label === "hl" && m.master === master && m.start <= e && s <= m.end) return i;
+  }
+  return -1;
+}
 function highlight() {
   const c = curClip();
-  if (!c || !video.duration) return;
+  if (!markReady()) return;
   const t = video.currentTime;
-  addMark(c.master, Math.max(0, t - HL_PRE), Math.min(video.duration, t + HL_POST), "hl");
+  const s = Math.max(0, t - HL_PRE),
+    e = Math.min(video.duration, t + HL_POST);
+  const prev = highlightToExtend(P.marks, c.master, s, e);
+  if (prev < 0) return addMark(c.master, s, e, "hl");
+  extendMark(prev, Math.min(P.marks[prev].start, s), Math.max(P.marks[prev].end, e));
 }
 // Snapshot the current marks before an edit, so `u` can revert *that* edit rather
 // than blindly popping the newest mark. Capped so a long session can't grow it
@@ -2468,6 +2500,23 @@ function addMark(master, start, end, label) {
   snapshotMarks();
   P.marks.push({ master, start, end, label });
   P.selected = P.marks.length - 1;
+  renderMarks();
+  renderScrubMarks();
+  updateFilmstripActive();
+  scheduleSave();
+}
+function extendMark(idx, start, end) {
+  snapshotMarks();
+  const m = P.marks[idx];
+  m.start = start;
+  m.end = end;
+  P.selected = idx;
+  // A loop running on this mark reads its own copy of the edges (see trimLoop).
+  if (P.zoneMark === idx) {
+    P.zoneStart = start;
+    P.zoneEnd = end;
+    renderZone();
+  }
   renderMarks();
   renderScrubMarks();
   updateFilmstripActive();
