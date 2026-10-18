@@ -2111,21 +2111,16 @@ fn cut_removes_only_what_it_made_and_can_make_again() {
     let c01 = clips.join("jaeho__dji__DJI_0001_c01_jump.mp4");
     let c02 = clips.join("jaeho__dji__DJI_0002_c02_two.mp4");
     // Placed before the first cut: a cut of a present master that no mark names
-    // (what a dedup prune carries over), a file of the user's own, and a clip at
-    // a wanted name from before the manifest existed — unverifiable, so re-cut.
+    // (what a dedup prune carries over) and a file of the user's own.
     let carried = clips.join("jaeho__dji__DJI_0001_c05_extra.mp4");
     let mine = clips.join("final-edit.mp4");
     touch(&carried, 7, 100, 1);
     touch(&mine, 8, 100, 1);
-    touch(&c01, 9, 5, 1);
 
     marks(vec![mark(&one, "jump"), mark(&two, "two")]);
     let r = cut();
     assert_eq!((r.made, r.skipped, r.removed, r.failed), (2, 0, 0, 0));
-    assert!(
-        fs::metadata(&c01).unwrap().len() > 1000,
-        "a clip nothing vouches for is cut again"
-    );
+    assert!(fs::metadata(&c01).unwrap().len() > 1000);
 
     // A mark whose master is missing fails the run, and a failed run removes
     // nothing: the second mark's clip is not wanted any more but stays for now.
@@ -2154,6 +2149,166 @@ fn cut_removes_only_what_it_made_and_can_make_again() {
     let r = cut();
     assert_eq!((r.made, r.skipped, r.removed, r.failed), (0, 1, 0, 0));
     assert!(c02.is_file(), "the finished cut of a deleted master stays");
+}
+
+/// Cut deletes or overwrites a clip only when the file is still what it wrote.
+/// The manifest names a clip but a name can't say the file under it is
+/// unchanged, so a clip re-encoded or graded in place under its Cut name was
+/// deleted with its mark and re-cut over when the mark was trimmed, and a file
+/// the manifest never listed at a wanted name (cut before it existed, or carried
+/// in by a dedup prune) was cut over without a copy kept (#53).
+#[test]
+fn cut_leaves_alone_what_it_cannot_prove_it_made() {
+    if !have_ffmpeg() {
+        eprintln!("skipping cut_leaves_alone_what_it_cannot_prove_it_made: no ffmpeg");
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let trip = make_trip(&lib, "trip");
+    let master = trip.join("jaeho/dji/DJI_0001.MP4");
+    if !encode_test_clip(&master, 6) {
+        eprintln!("skipping: this ffmpeg can't encode H.264");
+        return;
+    }
+    let c = cfg(&lib, &d.path().join("state"), None);
+    let mark = |s: f64, e: f64, label: &str| reel_core::Mark {
+        master: master.display().to_string(),
+        start: s,
+        end: e,
+        label: label.into(),
+    };
+    let marks = |m: Vec<reel_core::Mark>| reel_core::save_marks(&c, "trip", m).unwrap();
+    let cut = || reel_core::cut_trip(&c, "trip", |_| {}).expect("cut");
+    let clips = trip.join("clips");
+    let (a, b, third) = (
+        clips.join("jaeho__dji__DJI_0001_c01_a.mp4"),
+        clips.join("jaeho__dji__DJI_0001_c02_b.mp4"),
+        clips.join("jaeho__dji__DJI_0001_c03_c.mp4"),
+    );
+    let graded = b"MY HAND-GRADED DELIVERABLE";
+    let unlisted = vec![5u8; 4242];
+    fs::create_dir_all(&clips).unwrap();
+    fs::write(&third, &unlisted).unwrap();
+
+    marks(vec![
+        mark(0.5, 1.5, "a"),
+        mark(2.0, 3.0, "b"),
+        mark(4.0, 5.0, "c"),
+    ]);
+    let r = cut();
+    assert_eq!(
+        (r.made, r.skipped, r.kept, r.removed, r.failed),
+        (2, 0, 1, 0, 0),
+        "a file the manifest never listed is not cut over"
+    );
+    assert_eq!(fs::read(&third).unwrap(), unlisted);
+
+    // The user regrades b in place, then trims its mark: the new range does not
+    // replace their file.
+    fs::write(&b, graded).unwrap();
+    marks(vec![
+        mark(0.5, 1.5, "a"),
+        mark(2.0, 3.5, "b"),
+        mark(4.0, 5.0, "c"),
+    ]);
+    let r = cut();
+    assert_eq!((r.made, r.skipped, r.kept, r.failed), (0, 1, 2, 0));
+    assert_eq!(
+        fs::read(&b).unwrap(),
+        graded,
+        "the graded clip survives a trim"
+    );
+
+    // Deleting the marks removes none of the three: Cut made b but b is no
+    // longer what it made, and it never made `third`.
+    marks(vec![mark(0.5, 1.5, "a")]);
+    let r = cut();
+    assert_eq!((r.made, r.skipped, r.removed, r.failed), (0, 1, 0, 0));
+    assert_eq!(fs::read(&b).unwrap(), graded);
+    assert_eq!(fs::read(&third).unwrap(), unlisted);
+
+    // Even a touch is an edit: with the clip's mtime moved, the same bytes are
+    // no longer provably Cut's, and the mark's deletion leaves them.
+    let before = fs::read(&a).unwrap();
+    let f = File::options().write(true).open(&a).unwrap();
+    f.set_modified(UNIX_EPOCH + Duration::from_secs(1_700_000_000))
+        .unwrap();
+    drop(f);
+    marks(vec![mark(2.0, 3.0, "d")]);
+    let r = cut();
+    assert_eq!((r.made, r.removed, r.failed), (1, 0, 0));
+    assert_eq!(fs::read(&a).unwrap(), before, "a touched clip is kept");
+
+    // A row with no stamp (written before there were any) vouches for nothing.
+    let d_clip = clips.join("jaeho__dji__DJI_0001_c01_d.mp4");
+    assert!(d_clip.is_file());
+    fs::write(
+        clips.join(".manifest"),
+        "jaeho__dji__DJI_0001_c01_d.mp4\tjaeho/dji/DJI_0001.MP4\t2.000-3.000\n",
+    )
+    .unwrap();
+    marks(vec![mark(4.0, 5.0, "e")]);
+    let r = cut();
+    assert_eq!((r.made, r.removed, r.failed), (1, 0, 0));
+    assert!(d_clip.is_file(), "an unstamped row can't remove its clip");
+}
+
+/// A relabelled mark's clip is renamed into place, but never over a file Cut did
+/// not make; both stay, and the toast's `kept` says why the new name holds
+/// someone else's file.
+#[test]
+fn cut_does_not_rename_a_clip_over_a_file_it_did_not_make() {
+    if !have_ffmpeg() {
+        eprintln!("skipping cut_does_not_rename_a_clip_over_a_file_it_did_not_make: no ffmpeg");
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let trip = make_trip(&lib, "trip");
+    let master = trip.join("jaeho/dji/DJI_0001.MP4");
+    if !encode_test_clip(&master, 3) {
+        eprintln!("skipping: this ffmpeg can't encode H.264");
+        return;
+    }
+    let c = cfg(&lib, &d.path().join("state"), None);
+    let marks = |label: &str| {
+        let m = reel_core::Mark {
+            master: master.display().to_string(),
+            start: 0.5,
+            end: 1.5,
+            label: label.into(),
+        };
+        reel_core::save_marks(&c, "trip", vec![m]).unwrap()
+    };
+    let cut = || reel_core::cut_trip(&c, "trip", |_| {}).expect("cut");
+    let clips = trip.join("clips");
+    let (old, new) = (
+        clips.join("jaeho__dji__DJI_0001_c01_jump.mp4"),
+        clips.join("jaeho__dji__DJI_0001_c01_hl.mp4"),
+    );
+
+    marks("jump");
+    assert_eq!(cut().made, 1);
+    let cut_bytes = fs::read(&old).unwrap();
+    fs::write(&new, b"MY OWN hl").unwrap();
+
+    marks("hl");
+    let r = cut();
+    assert_eq!((r.made, r.skipped, r.kept, r.removed), (0, 0, 1, 0));
+    assert_eq!(fs::read(&new).unwrap(), b"MY OWN hl");
+    assert_eq!(
+        fs::read(&old).unwrap(),
+        cut_bytes,
+        "the clip the mark's range was cut into stays until its name is free"
+    );
+
+    // Their file moved out of the way: now the rename goes through.
+    fs::remove_file(&new).unwrap();
+    let r = cut();
+    assert_eq!((r.made, r.skipped, r.kept, r.removed), (0, 1, 0, 0));
+    assert_eq!(fs::read(&new).unwrap(), cut_bytes);
+    assert!(!old.exists());
 }
 
 // ---- edit: hand-off to the external editor ----

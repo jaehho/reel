@@ -991,6 +991,7 @@ function renderShareAll() {
 function cutSummary(r) {
   const bits = [`Cut ${plural(r.made, "clip")}`];
   if (r.skipped) bits.push(`${r.skipped} up to date`);
+  if (r.kept) bits.push(`${plural(r.kept, "clip")} left alone, not as Cut made them`);
   if (r.removed) bits.push(`${plural(r.removed, "clip")} removed, no longer marked`);
   if (r.failed) bits.push(`${r.failed} failed`);
   return bits.join(" · ");

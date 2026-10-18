@@ -73,11 +73,14 @@ The engine honours the same env knobs as the script (`REEL_LIB`, `REEL_REMOTE`,
   are now. A clip whose mark hasn't changed is left untouched, a trimmed mark is
   cut again, a relabelled or renumbered one has its clip renamed, and a clip no
   mark asks for is removed (the toast says how many). Only a clip Cut itself made
-  can go (it keeps `clips/.manifest` to know), only while its master is still on
-  disk, and only after a run where nothing failed; cuts carried in from a pruned
-  duplicate, files you put there, and the finished cuts of a deleted master are
-  never touched. Clips left by versions before the manifest can't be checked:
-  the ones a mark still names are cut once more, the rest stay until you delete them.
+  can go or be cut over, and only while it is still as Cut left it
+  (`clips/.manifest` keeps each clip's mark, size and mtime), only while its
+  master is still on disk, and only after a run where nothing failed. Cuts
+  carried in from a pruned duplicate, files you put there, the finished cuts of a
+  deleted master, and clips you have since re-encoded or graded in place are
+  never touched; one sitting at a name a mark wants is counted in the toast as
+  left alone, and deleting it lets the next Cut make it afresh. That includes
+  clips left by versions before the manifest.
   **Edit** is the other way out: the trip's marks become one `.kdenlive`
   timeline against the masters, launched detached. Cut writes standalone files;
   Edit is where you go to work.
