@@ -1958,6 +1958,359 @@ fn cuts_marked_ranges_into_clips() {
     assert_eq!((r2.made, r2.skipped, r2.failed), (0, 2, 0));
 }
 
+/// A real `secs`-long H.264 clip at `path`, a keyframe every half second (`-g 15`
+/// at 30 fps) so a stream-copy cut lands on the marks it was given. False when
+/// this ffmpeg can't encode.
+fn encode_test_clip(path: &Path, secs: u32) -> bool {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::process::Command::new("ffmpeg")
+        .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y"])
+        .args(["-f", "lavfi", "-i"])
+        .arg(format!("testsrc=size=320x240:rate=30:duration={secs}"))
+        .args(["-c:v", "libx264", "-g", "15", "-pix_fmt", "yuv420p"])
+        .arg(path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// The clips in a trip's `clips/` (not the manifest beside them), sorted.
+fn clip_names(trip: &Path) -> Vec<String> {
+    let mut v: Vec<String> = fs::read_dir(trip.join("clips"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".mp4"))
+        .collect();
+    v.sort();
+    v
+}
+
+/// Cut leaves `clips/` matching the marks as they are now. A trimmed mark, a
+/// relabelled one and a deleted earlier one (which renumbers the rest) each used
+/// to leave the old clip behind while the new name read "already there", so
+/// `clips/` drifted from `marks.tsv` without a word (#53).
+#[test]
+fn cut_follows_the_marks_it_was_made_from() {
+    use std::os::unix::fs::MetadataExt;
+    if !have_ffmpeg() {
+        eprintln!("skipping cut_follows_the_marks_it_was_made_from: ffmpeg not installed");
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let trip = make_trip(&lib, "trip");
+    let master = trip.join("jaeho/dji/DJI_0001.MP4");
+    if !encode_test_clip(&master, 4) {
+        eprintln!("skipping: this ffmpeg can't encode H.264");
+        return;
+    }
+    let c = cfg(&lib, &d.path().join("state"), None);
+    let mark = |s: f64, e: f64, label: &str| reel_core::Mark {
+        master: master.display().to_string(),
+        start: s,
+        end: e,
+        label: label.into(),
+    };
+    let clips = trip.join("clips");
+    let secs = |name: &str| reel_core::media::clip_health(&clips.join(name)).duration;
+    let ino = |name: &str| fs::metadata(clips.join(name)).unwrap().ino();
+    let cut = || reel_core::cut_trip(&c, "trip", |_| {}).expect("cut");
+
+    reel_core::save_marks(
+        &c,
+        "trip",
+        vec![mark(0.5, 1.5, "jump"), mark(2.0, 3.0, "hl")],
+    )
+    .unwrap();
+    let r = cut();
+    assert_eq!((r.made, r.skipped, r.removed, r.failed), (2, 0, 0, 0));
+    let hl = ino("jaeho__dji__DJI_0001_c02_hl.mp4");
+    assert!((secs("jaeho__dji__DJI_0001_c01_jump.mp4") - 1.0).abs() < 0.3);
+
+    // Trim: the first mark grows a second. Same name as before, new range, so
+    // the clip is re-cut (not skipped) and the untouched one is left alone.
+    reel_core::save_marks(
+        &c,
+        "trip",
+        vec![mark(0.5, 2.5, "jump"), mark(2.0, 3.0, "hl")],
+    )
+    .unwrap();
+    let r = cut();
+    assert_eq!((r.made, r.skipped, r.removed, r.failed), (1, 1, 0, 0));
+    assert_eq!(clip_names(&trip).len(), 2, "the trim replaced its clip");
+    assert!(
+        (secs("jaeho__dji__DJI_0001_c01_jump.mp4") - 2.0).abs() < 0.3,
+        "the clip holds the trimmed range, not the old one"
+    );
+    assert_eq!(ino("jaeho__dji__DJI_0001_c02_hl.mp4"), hl);
+
+    // Relabel: same range under a new name. The clip is renamed, not re-cut.
+    reel_core::save_marks(
+        &c,
+        "trip",
+        vec![mark(0.5, 2.5, "jump"), mark(2.0, 3.0, "highlight")],
+    )
+    .unwrap();
+    let r = cut();
+    assert_eq!((r.made, r.skipped, r.removed, r.failed), (0, 2, 0, 0));
+    assert_eq!(
+        clip_names(&trip),
+        [
+            "jaeho__dji__DJI_0001_c01_jump.mp4",
+            "jaeho__dji__DJI_0001_c02_highlight.mp4"
+        ],
+        "the old label's clip is gone"
+    );
+    assert_eq!(ino("jaeho__dji__DJI_0001_c02_highlight.mp4"), hl);
+
+    // Delete the first mark: the second becomes c01. Its clip follows it and the
+    // deleted mark's clip goes.
+    reel_core::save_marks(&c, "trip", vec![mark(2.0, 3.0, "highlight")]).unwrap();
+    let r = cut();
+    assert_eq!((r.made, r.skipped, r.removed, r.failed), (0, 1, 1, 0));
+    assert_eq!(
+        clip_names(&trip),
+        ["jaeho__dji__DJI_0001_c01_highlight.mp4"]
+    );
+    assert_eq!(ino("jaeho__dji__DJI_0001_c01_highlight.mp4"), hl);
+}
+
+/// What Cut may remove: only clips it recorded making, only after a run with no
+/// failures, and only while their master is on disk to cut them from again. A cut
+/// carried in from a pruned duplicate, a file placed by hand and the finished cut
+/// of a deleted master all sit in `clips/` too, and are deliverables (#11, #53).
+#[test]
+fn cut_removes_only_what_it_made_and_can_make_again() {
+    if !have_ffmpeg() {
+        eprintln!("skipping cut_removes_only_what_it_made_and_can_make_again: no ffmpeg");
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let trip = make_trip(&lib, "trip");
+    let (one, two) = (
+        trip.join("jaeho/dji/DJI_0001.MP4"),
+        trip.join("jaeho/dji/DJI_0002.MP4"),
+    );
+    if !encode_test_clip(&one, 3) || !encode_test_clip(&two, 3) {
+        eprintln!("skipping: this ffmpeg can't encode H.264");
+        return;
+    }
+    let c = cfg(&lib, &d.path().join("state"), None);
+    let mark = |master: &Path, label: &str| reel_core::Mark {
+        master: master.display().to_string(),
+        start: 0.5,
+        end: 1.5,
+        label: label.into(),
+    };
+    let ghost = trip.join("jaeho/dji/DJI_0099.MP4");
+    let clips = trip.join("clips");
+    let cut = || reel_core::cut_trip(&c, "trip", |_| {}).expect("cut");
+    let marks = |m: Vec<reel_core::Mark>| reel_core::save_marks(&c, "trip", m).unwrap();
+    let c01 = clips.join("jaeho__dji__DJI_0001_c01_jump.mp4");
+    let c02 = clips.join("jaeho__dji__DJI_0002_c02_two.mp4");
+    // Placed before the first cut: a cut of a present master that no mark names
+    // (what a dedup prune carries over) and a file of the user's own.
+    let carried = clips.join("jaeho__dji__DJI_0001_c05_extra.mp4");
+    let mine = clips.join("final-edit.mp4");
+    touch(&carried, 7, 100, 1);
+    touch(&mine, 8, 100, 1);
+
+    marks(vec![mark(&one, "jump"), mark(&two, "two")]);
+    let r = cut();
+    assert_eq!((r.made, r.skipped, r.removed, r.failed), (2, 0, 0, 0));
+    assert!(fs::metadata(&c01).unwrap().len() > 1000);
+
+    // A mark whose master is missing fails the run, and a failed run removes
+    // nothing: the second mark's clip is not wanted any more but stays for now.
+    marks(vec![mark(&one, "jump"), mark(&ghost, "lost")]);
+    let r = cut();
+    assert_eq!((r.made, r.skipped, r.removed, r.failed), (0, 1, 0, 1));
+    assert!(c02.is_file(), "nothing is removed while a cut is failing");
+
+    // Fixed, and the run is clean: now the clip with no mark goes, and only it.
+    marks(vec![mark(&one, "jump")]);
+    let r = cut();
+    assert_eq!((r.made, r.skipped, r.removed, r.failed), (0, 1, 1, 0));
+    assert!(!c02.exists());
+    assert!(
+        carried.is_file(),
+        "a carried-in cut was never Cut's to remove"
+    );
+    assert!(mine.is_file(), "neither was a file placed by hand");
+
+    // A clip whose master is gone can't be made again, so it is kept.
+    marks(vec![mark(&one, "jump"), mark(&two, "two")]);
+    assert_eq!(cut().made, 1);
+    assert!(c02.is_file());
+    fs::remove_file(&two).unwrap();
+    marks(vec![mark(&one, "jump")]);
+    let r = cut();
+    assert_eq!((r.made, r.skipped, r.removed, r.failed), (0, 1, 0, 0));
+    assert!(c02.is_file(), "the finished cut of a deleted master stays");
+}
+
+/// Cut deletes or overwrites a clip only when the file is still what it wrote.
+/// The manifest names a clip but a name can't say the file under it is
+/// unchanged, so a clip re-encoded or graded in place under its Cut name was
+/// deleted with its mark and re-cut over when the mark was trimmed, and a file
+/// the manifest never listed at a wanted name (cut before it existed, or carried
+/// in by a dedup prune) was cut over without a copy kept (#53).
+#[test]
+fn cut_leaves_alone_what_it_cannot_prove_it_made() {
+    if !have_ffmpeg() {
+        eprintln!("skipping cut_leaves_alone_what_it_cannot_prove_it_made: no ffmpeg");
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let trip = make_trip(&lib, "trip");
+    let master = trip.join("jaeho/dji/DJI_0001.MP4");
+    if !encode_test_clip(&master, 6) {
+        eprintln!("skipping: this ffmpeg can't encode H.264");
+        return;
+    }
+    let c = cfg(&lib, &d.path().join("state"), None);
+    let mark = |s: f64, e: f64, label: &str| reel_core::Mark {
+        master: master.display().to_string(),
+        start: s,
+        end: e,
+        label: label.into(),
+    };
+    let marks = |m: Vec<reel_core::Mark>| reel_core::save_marks(&c, "trip", m).unwrap();
+    let cut = || reel_core::cut_trip(&c, "trip", |_| {}).expect("cut");
+    let clips = trip.join("clips");
+    let (a, b, third) = (
+        clips.join("jaeho__dji__DJI_0001_c01_a.mp4"),
+        clips.join("jaeho__dji__DJI_0001_c02_b.mp4"),
+        clips.join("jaeho__dji__DJI_0001_c03_c.mp4"),
+    );
+    let graded = b"MY HAND-GRADED DELIVERABLE";
+    let unlisted = vec![5u8; 4242];
+    fs::create_dir_all(&clips).unwrap();
+    fs::write(&third, &unlisted).unwrap();
+
+    marks(vec![
+        mark(0.5, 1.5, "a"),
+        mark(2.0, 3.0, "b"),
+        mark(4.0, 5.0, "c"),
+    ]);
+    let r = cut();
+    assert_eq!(
+        (r.made, r.skipped, r.kept, r.removed, r.failed),
+        (2, 0, 1, 0, 0),
+        "a file the manifest never listed is not cut over"
+    );
+    assert_eq!(fs::read(&third).unwrap(), unlisted);
+
+    // The user regrades b in place, then trims its mark: the new range does not
+    // replace their file.
+    fs::write(&b, graded).unwrap();
+    marks(vec![
+        mark(0.5, 1.5, "a"),
+        mark(2.0, 3.5, "b"),
+        mark(4.0, 5.0, "c"),
+    ]);
+    let r = cut();
+    assert_eq!((r.made, r.skipped, r.kept, r.failed), (0, 1, 2, 0));
+    assert_eq!(
+        fs::read(&b).unwrap(),
+        graded,
+        "the graded clip survives a trim"
+    );
+
+    // Deleting the marks removes none of the three: Cut made b but b is no
+    // longer what it made, and it never made `third`.
+    marks(vec![mark(0.5, 1.5, "a")]);
+    let r = cut();
+    assert_eq!((r.made, r.skipped, r.removed, r.failed), (0, 1, 0, 0));
+    assert_eq!(fs::read(&b).unwrap(), graded);
+    assert_eq!(fs::read(&third).unwrap(), unlisted);
+
+    // Even a touch is an edit: with the clip's mtime moved, the same bytes are
+    // no longer provably Cut's, and the mark's deletion leaves them.
+    let before = fs::read(&a).unwrap();
+    let f = File::options().write(true).open(&a).unwrap();
+    f.set_modified(UNIX_EPOCH + Duration::from_secs(1_700_000_000))
+        .unwrap();
+    drop(f);
+    marks(vec![mark(2.0, 3.0, "d")]);
+    let r = cut();
+    assert_eq!((r.made, r.removed, r.failed), (1, 0, 0));
+    assert_eq!(fs::read(&a).unwrap(), before, "a touched clip is kept");
+
+    // A row with no stamp (written before there were any) vouches for nothing.
+    let d_clip = clips.join("jaeho__dji__DJI_0001_c01_d.mp4");
+    assert!(d_clip.is_file());
+    fs::write(
+        clips.join(".manifest"),
+        "jaeho__dji__DJI_0001_c01_d.mp4\tjaeho/dji/DJI_0001.MP4\t2.000-3.000\n",
+    )
+    .unwrap();
+    marks(vec![mark(4.0, 5.0, "e")]);
+    let r = cut();
+    assert_eq!((r.made, r.removed, r.failed), (1, 0, 0));
+    assert!(d_clip.is_file(), "an unstamped row can't remove its clip");
+}
+
+/// A relabelled mark's clip is renamed into place, but never over a file Cut did
+/// not make; both stay, and the toast's `kept` says why the new name holds
+/// someone else's file.
+#[test]
+fn cut_does_not_rename_a_clip_over_a_file_it_did_not_make() {
+    if !have_ffmpeg() {
+        eprintln!("skipping cut_does_not_rename_a_clip_over_a_file_it_did_not_make: no ffmpeg");
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let trip = make_trip(&lib, "trip");
+    let master = trip.join("jaeho/dji/DJI_0001.MP4");
+    if !encode_test_clip(&master, 3) {
+        eprintln!("skipping: this ffmpeg can't encode H.264");
+        return;
+    }
+    let c = cfg(&lib, &d.path().join("state"), None);
+    let marks = |label: &str| {
+        let m = reel_core::Mark {
+            master: master.display().to_string(),
+            start: 0.5,
+            end: 1.5,
+            label: label.into(),
+        };
+        reel_core::save_marks(&c, "trip", vec![m]).unwrap()
+    };
+    let cut = || reel_core::cut_trip(&c, "trip", |_| {}).expect("cut");
+    let clips = trip.join("clips");
+    let (old, new) = (
+        clips.join("jaeho__dji__DJI_0001_c01_jump.mp4"),
+        clips.join("jaeho__dji__DJI_0001_c01_hl.mp4"),
+    );
+
+    marks("jump");
+    assert_eq!(cut().made, 1);
+    let cut_bytes = fs::read(&old).unwrap();
+    fs::write(&new, b"MY OWN hl").unwrap();
+
+    marks("hl");
+    let r = cut();
+    assert_eq!((r.made, r.skipped, r.kept, r.removed), (0, 0, 1, 0));
+    assert_eq!(fs::read(&new).unwrap(), b"MY OWN hl");
+    assert_eq!(
+        fs::read(&old).unwrap(),
+        cut_bytes,
+        "the clip the mark's range was cut into stays until its name is free"
+    );
+
+    // Their file moved out of the way: now the rename goes through.
+    fs::remove_file(&new).unwrap();
+    let r = cut();
+    assert_eq!((r.made, r.skipped, r.kept, r.removed), (0, 1, 0, 0));
+    assert_eq!(fs::read(&new).unwrap(), cut_bytes);
+    assert!(!old.exists());
+}
+
 // ---- edit: hand-off to the external editor ----
 
 /// Edit builds a timeline or it errors — it never opens something else instead.
@@ -2383,6 +2736,42 @@ fn merging_carries_orphan_cuts_instead_of_deleting_them() {
     );
 }
 
+/// Cut's `clips/.manifest` is bookkeeping for its own folder, not a finished cut:
+/// a merge that carries the source's orphan cuts over must leave it alone (it
+/// became `.manifest__a.mp4`, a phantom clip on the card) and must not count it
+/// as something worth keeping the source trip for.
+#[test]
+fn merging_does_not_carry_the_cut_manifest() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    make_trip(&lib, "a");
+    make_trip(&lib, "b");
+    touch(
+        &lib.join("a/jaeho/dji/DJI_0001.MP4"),
+        1,
+        2_000_000,
+        1_700_000_000,
+    );
+    touch(&lib.join("a/clips/.manifest"), 5, 40, 1_700_000_100);
+    touch(&lib.join("b/clips/.manifest"), 6, 40, 1_700_000_100);
+
+    let c = cfg(&lib, &state, None);
+    reel_core::merge_trips(&c, "a", "b").expect("merge ok");
+
+    assert_eq!(
+        fs::read(lib.join("b/clips/.manifest")).unwrap()[0],
+        6,
+        "the destination keeps its own manifest"
+    );
+    assert_eq!(clip_names(&lib.join("b")), Vec::<String>::new());
+    assert!(
+        !lib.join("a").exists(),
+        "a manifest alone doesn't keep the source trip"
+    );
+}
+
 #[test]
 fn moving_shared_footage_offline_unshares_the_dest() {
     let d = tempfile::tempdir().unwrap();
@@ -2694,6 +3083,210 @@ fn delete_trip_purges_only_your_pool_subtree() {
         cloud.join("bali/alice/dji/DJI_0050.MP4").is_file(),
         "a friend's cloud footage is left untouched"
     );
+}
+
+/// #52: an archived trip has no masters here and its whole footage in the cloud, so
+/// the card said "0 clips" while the purge took the only copy. The preview names
+/// it, from local records alone, and the result counts what the purge erased.
+#[test]
+fn deleting_an_archived_trip_reports_the_cloud_copy_it_erases() {
+    if !have_rclone() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (_lib, cloud, c, trip) = sync_env(d.path());
+    reel_core::push_trip(&c, "bali", |_| {}).expect("push");
+    reel_core::commit_archive(&c, "bali", |_| {}).expect("archive");
+    let up = cloud.join("bali/jaeho/dji/DJI_0001.MP4");
+
+    let p = reel_core::delete_trip_preview(&c, "bali").expect("preview");
+    assert_eq!(p.masters, 0, "archived: nothing raw left here");
+    assert!(p.shared);
+    assert_eq!((p.cloud_clips, p.cloud_bytes), (1, 2_000_000));
+    assert_eq!(
+        (p.only_clips, p.only_bytes),
+        (1, 2_000_000),
+        "the cloud copy is the only copy"
+    );
+    assert!(up.is_file() && trip.is_dir(), "a preview deletes nothing");
+
+    let r = reel_core::delete_trip(&c, "bali").expect("delete trip");
+    assert_eq!(r.deleted, 0);
+    assert_eq!(r.in_cloud, 1, "the toast must count what the purge erased");
+    assert!(r.cloud_ok);
+    assert!(!up.exists(), "and it really was erased");
+}
+
+/// Two clips pushed, then the cloud listed (the Sync panel's refresh), so the
+/// cached listing holds both. Returns the masters in sorted order.
+fn two_pushed_and_listed(d: &Path) -> (PathBuf, Config, Vec<String>) {
+    let (_lib, cloud, c, trip) = sync_env(d);
+    touch(
+        &trip.join("jaeho/dji/DJI_0002.MP4"),
+        2,
+        3_000_000,
+        1_700_000_100,
+    );
+    reel_core::push_trip(&c, "bali", |_| {}).expect("push");
+    reel_core::sync_status(&c, "bali", true).expect("list the cloud");
+    let masters = ["DJI_0001.MP4", "DJI_0002.MP4"]
+        .map(|n| trip.join("jaeho/dji").join(n).display().to_string());
+    (cloud, c, masters.to_vec())
+}
+
+/// The listing cached before an op that takes a clip out of the cloud folder
+/// must not keep counting it: the delete confirm names clips that are gone from
+/// this trip's folder, and its typed-name gate fires for them.
+#[test]
+fn delete_preview_forgets_clips_moved_out_of_the_trip() {
+    if !have_rclone() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (cloud, c, masters) = two_pushed_and_listed(d.path());
+    reel_core::move_clips(&c, &masters[..1], "oslo").expect("move");
+    assert!(cloud.join("oslo/jaeho/dji/DJI_0001.MP4").is_file());
+
+    let p = reel_core::delete_trip_preview(&c, "bali").expect("preview");
+    assert_eq!(p.masters, 1, "one clip is still here");
+    assert_eq!(
+        (p.cloud_clips, p.cloud_bytes),
+        (1, 3_000_000),
+        "the moved clip is no longer in bali's cloud folder"
+    );
+    assert_eq!(p.only_clips, 0, "the clip left in bali has a copy here");
+}
+
+#[test]
+fn delete_preview_forgets_clips_deleted_from_the_cloud() {
+    if !have_rclone() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (cloud, c, masters) = two_pushed_and_listed(d.path());
+    let r = reel_core::delete_clips(&c, &masters[..1]).expect("delete");
+    assert!(r.cloud_ok && r.in_cloud == 1);
+    assert!(!cloud.join("bali/jaeho/dji/DJI_0001.MP4").exists());
+
+    let p = reel_core::delete_trip_preview(&c, "bali").expect("preview");
+    assert_eq!((p.cloud_clips, p.cloud_bytes), (1, 3_000_000));
+    assert_eq!(p.only_clips, 0);
+
+    let r = reel_core::delete_trip(&c, "bali").expect("delete trip");
+    assert_eq!(r.in_cloud, 1, "the toast counts what the purge erased");
+    assert!(!cloud.join("bali/jaeho").exists());
+}
+
+/// A cloud delete that did not land leaves the clip up there, so the purge
+/// still erases it and the preview must still name it.
+#[test]
+fn delete_preview_keeps_a_clip_whose_cloud_delete_did_not_land() {
+    if !have_rclone() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (cloud, c, masters) = two_pushed_and_listed(d.path());
+    let mut off = c.clone();
+    off.remote = "reel_absent_remote_z:cloud".into();
+    let r = reel_core::delete_clips(&off, &masters[..1]).expect("delete");
+    assert!(!r.cloud_ok);
+    assert!(cloud.join("bali/jaeho/dji/DJI_0001.MP4").is_file());
+
+    let p = reel_core::delete_trip_preview(&c, "bali").expect("preview");
+    assert_eq!(p.cloud_clips, 2, "both are still in the cloud");
+    assert_eq!((p.only_clips, p.only_bytes), (1, 2_000_000));
+}
+
+fn shared_trip(d: &Path) -> (PathBuf, Config) {
+    let lib = d.join("Videos");
+    let state = d.join("state");
+    fs::create_dir_all(&state).unwrap();
+    let trip = make_trip(&lib, "bali");
+    fs::write(trip.join(".reel"), "reel project\nshare=shared\n").unwrap();
+    (trip, cfg(&lib, &state, None))
+}
+
+fn baseline(c: &Config, rows: &[(&str, u64)]) {
+    let mut b = reel_core::store::FileSet::default();
+    for (rel, size) in rows {
+        b.insert(rel, *size);
+    }
+    b.save(&c.base_path("bali")).unwrap();
+}
+
+#[test]
+fn delete_preview_separates_local_copies_from_the_only_cloud_copy() {
+    let d = tempfile::tempdir().unwrap();
+    let (trip, c) = shared_trip(d.path());
+    // dji is still on this machine; gopro was archived; alice's is pulled
+    touch(&trip.join("jaeho/dji/DJI_0001.MP4"), 1, 2_000_000, 1);
+    touch(&trip.join("alice/dji/DJI_0050.MP4"), 2, 1_000_000, 1);
+    baseline(
+        &c,
+        &[
+            ("jaeho/dji/DJI_0001.MP4", 2_000_000),
+            ("jaeho/gopro/GX010001.MP4", 3_000_000),
+            ("alice/dji/DJI_0050.MP4", 1_000_000),
+        ],
+    );
+
+    let p = reel_core::delete_trip_preview(&c, "bali").expect("preview");
+    assert_eq!(p.masters, 2, "both local masters go, pulled one included");
+    assert_eq!(
+        (p.cloud_clips, p.cloud_bytes),
+        (2, 5_000_000),
+        "the purge takes your folder only, not alice's"
+    );
+    assert_eq!((p.only_clips, p.only_bytes), (1, 3_000_000));
+}
+
+#[test]
+fn delete_preview_counts_what_only_the_cloud_listing_knows() {
+    use reel_core::store::{save_cloud_cache, FileSet};
+    let d = tempfile::tempdir().unwrap();
+    let (trip, c) = shared_trip(d.path());
+    touch(&trip.join("jaeho/dji/DJI_0001.MP4"), 1, 2_000_000, 1);
+    baseline(&c, &[("jaeho/dji/DJI_0001.MP4", 2_000_000)]);
+    // uploaded from another machine: in the cloud, never in this baseline
+    let mut listing = FileSet::default();
+    listing.insert("jaeho/dji/DJI_0001.MP4", 2_000_000);
+    listing.insert("jaeho/gopro/GX010009.MP4", 4_000_000);
+    save_cloud_cache(&c.cloud_cache_path("bali"), 1_700_000_000, &listing).unwrap();
+
+    let p = reel_core::delete_trip_preview(&c, "bali").expect("preview");
+    assert_eq!((p.cloud_clips, p.cloud_bytes), (2, 6_000_000));
+    assert_eq!((p.only_clips, p.only_bytes), (1, 4_000_000));
+}
+
+#[test]
+fn delete_preview_has_no_cloud_side_for_an_unshared_trip() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    let trip = make_trip(&lib, "bali");
+    touch(&trip.join("jaeho/dji/DJI_0001.MP4"), 1, 2_000_000, 1);
+    let c = cfg(&lib, &state, None);
+    // a leftover baseline row must not read as a purge that will not run
+    baseline(&c, &[("jaeho/dji/DJI_0001.MP4", 2_000_000)]);
+
+    let p = reel_core::delete_trip_preview(&c, "bali").expect("preview");
+    assert_eq!(p.masters, 1);
+    assert!(!p.shared);
+    assert_eq!((p.cloud_clips, p.only_clips), (0, 0));
+    assert!(reel_core::delete_trip_preview(&c, "../bali").is_err());
+    assert!(reel_core::delete_trip_preview(&c, "nope").is_err());
+}
+
+#[test]
+fn delete_preview_trusts_the_share_flag_when_nothing_else_is_recorded() {
+    // shared before baselines existed: no B, no listing; what's here went up
+    let d = tempfile::tempdir().unwrap();
+    let (trip, c) = shared_trip(d.path());
+    touch(&trip.join("jaeho/dji/DJI_0001.MP4"), 1, 2_000_000, 1);
+
+    let p = reel_core::delete_trip_preview(&c, "bali").expect("preview");
+    assert_eq!((p.cloud_clips, p.only_clips), (1, 0));
 }
 
 // ---- pull: bring others' footage down from the cloud ----

@@ -617,7 +617,7 @@ function footActions(t, card) {
     const cut = elHTML("button", "btn small ghost", '<span class="btn-ico" aria-hidden="true">✂</span> Cut');
     cut.type = "button";
     cut.title = t.clips > 0
-      ? `Cut ${t.name}'s new marks into clips (existing ones are left alone)`
+      ? `Cut ${t.name}'s marks into clips (unchanged ones are kept, trimmed ones re-cut, clips with no mark removed)`
       : `Cut ${t.name}'s ${plural(t.marks, "mark")} into standalone clips`;
     cut.onclick = () => startCut(t);
     actions.append(cut);
@@ -990,7 +990,9 @@ function renderShareAll() {
 // ---- cut: write a trip's marked ranges into clips/, progress inline on the card ----
 function cutSummary(r) {
   const bits = [`Cut ${plural(r.made, "clip")}`];
-  if (r.skipped) bits.push(`${r.skipped} already there`);
+  if (r.skipped) bits.push(`${r.skipped} up to date`);
+  if (r.kept) bits.push(`${plural(r.kept, "clip")} left alone, not as Cut made them`);
+  if (r.removed) bits.push(`${plural(r.removed, "clip")} removed, no longer marked`);
   if (r.failed) bits.push(`${r.failed} failed`);
   return bits.join(" · ");
 }
@@ -2421,8 +2423,23 @@ function seekFromEvent(e) {
 function armPending(on) {
   $("#hint-out")?.classList.toggle("armed", on);
 }
+// i / o / h read the playhead, and until <video> holds the clip on screen (see
+// videoReady) that is the previous clip's: the new clip would get its time. A stub
+// has no timeline and its stage note already says why, so only a clip that is
+// still on its way earns a toast.
+function markReady() {
+  const c = curClip();
+  if (!c || c.stub) return false;
+  if (!videoReady()) {
+    toast("Still loading this clip.");
+    return false;
+  }
+  return !!video.duration;
+}
+// Shortest segment i/o will save. `i` then `o` at one instant is a slip, not a mark.
+const MIN_MARK = 0.1;
 function markIn() {
-  if (!video.duration) return;
+  if (!markReady()) return;
   if (P.zoneLoop && trimLoop(0)) return;
   P.pendingIn = video.currentTime;
   armPending(true);
@@ -2430,22 +2447,39 @@ function markIn() {
 }
 function markOut() {
   const c = curClip();
-  if (!c) return;
+  if (!markReady()) return;
   if (P.zoneLoop && trimLoop(1)) return;
   if (P.pendingIn == null) return toast("Nothing started yet — press i first, or h to keep the last few seconds.");
   let s = P.pendingIn,
     e = video.currentTime;
   if (e < s) [s, e] = [e, s];
+  // The start stays armed, so moving the playhead and pressing `o` again finishes it.
+  if (e - s < MIN_MARK) return toast("Too short — move the playhead and press o again.");
   P.pendingIn = null;
   hidePending();
   armPending(false);
   addMark(c.master, s, e, "");
 }
+// `h` is pressed while a moment is still going on, so a few presses in a row stack
+// near-identical windows (20 presses in a 20 s clip made 20 marks). The latest
+// highlight on this clip that touches [s, e] takes the new window in instead.
+// Only the unlabelled "hl" kind: a mark you've renamed is yours, not a duplicate.
+function highlightToExtend(marks, master, s, e) {
+  for (let i = marks.length - 1; i >= 0; i--) {
+    const m = marks[i];
+    if (m.label === "hl" && m.master === master && m.start <= e && s <= m.end) return i;
+  }
+  return -1;
+}
 function highlight() {
   const c = curClip();
-  if (!c || !video.duration) return;
+  if (!markReady()) return;
   const t = video.currentTime;
-  addMark(c.master, Math.max(0, t - HL_PRE), Math.min(video.duration, t + HL_POST), "hl");
+  const s = Math.max(0, t - HL_PRE),
+    e = Math.min(video.duration, t + HL_POST);
+  const prev = highlightToExtend(P.marks, c.master, s, e);
+  if (prev < 0) return addMark(c.master, s, e, "hl");
+  extendMark(prev, Math.min(P.marks[prev].start, s), Math.max(P.marks[prev].end, e));
 }
 // Snapshot the current marks before an edit, so `u` can revert *that* edit rather
 // than blindly popping the newest mark. Capped so a long session can't grow it
@@ -2468,6 +2502,23 @@ function addMark(master, start, end, label) {
   snapshotMarks();
   P.marks.push({ master, start, end, label });
   P.selected = P.marks.length - 1;
+  renderMarks();
+  renderScrubMarks();
+  updateFilmstripActive();
+  scheduleSave();
+}
+function extendMark(idx, start, end) {
+  snapshotMarks();
+  const m = P.marks[idx];
+  m.start = start;
+  m.end = end;
+  P.selected = idx;
+  // A loop running on this mark reads its own copy of the edges (see trimLoop).
+  if (P.zoneMark === idx) {
+    P.zoneStart = start;
+    P.zoneEnd = end;
+    renderZone();
+  }
   renderMarks();
   renderScrubMarks();
   updateFilmstripActive();
@@ -3311,30 +3362,50 @@ nameDlg.addEventListener("click", (e) => {
 
 // Confirm an irreversible action. Resolves true only on the explicit confirm.
 // `body` is HTML (callers want <strong> emphasis) — run any name through `esc()`.
+// `typeToConfirm` is for a loss with no other copy: the confirm button stays
+// disabled until that exact text is typed.
 const dangerDlg = $("#danger-dialog");
-function confirmDanger({ title = "Delete", body = "", confirmLabel = "Delete forever" }) {
+function confirmDanger({ title = "Delete", body = "", confirmLabel = "Delete forever", typeToConfirm = null }) {
+  const go = $("#danger-go");
+  const typed = $("#danger-type");
+  const armed = () => !typeToConfirm || typed.value.trim() === typeToConfirm;
   $("#danger-title").textContent = title;
   $("#danger-body").innerHTML = body;
   $("#danger-error").hidden = true;
-  $("#danger-go").textContent = confirmLabel;
+  go.textContent = confirmLabel;
+  $("#danger-type-field").hidden = !typeToConfirm;
+  $("#danger-type-label").innerHTML = typeToConfirm ? `Type <strong>${esc(typeToConfirm)}</strong> to confirm` : "";
+  typed.value = "";
+  go.disabled = !armed();
   dangerDlg.showModal();
-  $("#danger-cancel").focus();
+  (typeToConfirm ? typed : $("#danger-cancel")).focus();
   return new Promise((resolve) => {
     const cleanup = () => {
-      $("#danger-go").removeEventListener("click", onGo);
+      go.removeEventListener("click", onGo);
       $("#danger-cancel").removeEventListener("click", onNo);
       dangerDlg.removeEventListener("close", onNo);
+      typed.removeEventListener("input", onType);
+      typed.removeEventListener("keydown", onKey);
     };
     const finish = (v) => {
       cleanup();
       if (dangerDlg.open) dangerDlg.close();
       resolve(v);
     };
-    const onGo = () => finish(true);
+    const onGo = () => armed() && finish(true);
     const onNo = () => finish(false);
-    $("#danger-go").addEventListener("click", onGo);
+    const onType = () => (go.disabled = !armed());
+    // A lone text field submits its form on Enter, which would close the dialog.
+    const onKey = (e) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      onGo();
+    };
+    go.addEventListener("click", onGo);
     $("#danger-cancel").addEventListener("click", onNo);
     dangerDlg.addEventListener("close", onNo);
+    typed.addEventListener("input", onType);
+    typed.addEventListener("keydown", onKey);
   });
 }
 dangerDlg.addEventListener("click", (e) => {
@@ -3342,9 +3413,10 @@ dangerDlg.addEventListener("click", (e) => {
 });
 
 function deleteSummary(r) {
-  const bits = [`Deleted ${plural(r.deleted, "clip")}`];
-  if (r.bytes) bits[0] += ` · ${fmtBytes(r.bytes)}`;
-  if (r.inCloud) bits.push(`${r.inCloud} from the cloud`);
+  // An archived trip deletes no local clip: its loss is all in the cloud (#52).
+  const bits = [r.deleted || !r.inCloud ? `Deleted ${plural(r.deleted, "clip")}` : "Deleted the trip"];
+  if (r.bytes >= 1048576) bits[0] += ` · ${fmtBytes(r.bytes)}`;
+  if (r.inCloud) bits.push(`${plural(r.inCloud, "clip")} from the cloud`);
   if (r.keptCloud) bits.push(`${r.keptCloud} kept in the cloud`);
   if (!r.cloudOk) bits.push("cloud cleanup owed — retry online");
   return bits.join(" · ");
@@ -3445,12 +3517,37 @@ async function mergeTripInto(t) {
     toast(String(e));
   }
 }
+// What deleting a trip erases and from where, from `delete_trip_preview` (local
+// clips, your cloud copies, and which of those have no copy here). The card's own
+// counts can't say it: an archived trip has no local clips (`masters` 0) yet all
+// its footage in the cloud, and the old body read "0 clips" over the only copy
+// (#52). `typed` is the name to type when the cloud copy is the only one.
+function deleteTripPlan(name, p) {
+  const here = p.masters > 0 ? `${plural(p.masters, "clip")}, its cut, and marks` : "no raw clips here, only its cut and marks";
+  const size = p.bytes >= 1048576 ? ` (${fmtBytes(p.bytes)})` : "";
+  const lines = [`Permanently delete <strong>${esc(name)}</strong> from this computer: ${here}${size}.`];
+  if (p.cloudClips > 0) {
+    lines.push(`Also erased from the cloud: your ${plural(p.cloudClips, "clip")} (${fmtBytes(p.cloudBytes)}).`);
+  }
+  if (p.onlyClips > 0) {
+    const where = p.onlyClips === 1 ? "It's in the cloud and nowhere on this computer" : "They're in the cloud and nowhere on this computer";
+    lines.push(`<strong class="loss">This erases the only copy of ${plural(p.onlyClips, "clip")} (${fmtBytes(p.onlyBytes)}). ${where}.</strong>`);
+  }
+  lines.push("This can't be undone.");
+  return { body: lines.join("<br>"), typed: p.onlyClips > 0 ? name : null };
+}
 async function deleteTripConfirm(t) {
-  const cloud = t.mine > 0 && t.share === "shared" ? " Your footage is erased from the cloud too." : "";
+  let plan;
+  try {
+    plan = deleteTripPlan(t.name, await invoke("delete_trip_preview", { trip: t.name }));
+  } catch (e) {
+    return toast(String(e));
+  }
   const ok = await confirmDanger({
     title: `Delete ${t.name}`,
-    body: `Permanently delete <strong>${esc(t.name)}</strong> — ${plural(t.masters, "clip")}, its cut, and marks.${cloud} This can't be undone.`,
+    body: plan.body,
     confirmLabel: "Delete forever",
+    typeToConfirm: plan.typed,
   });
   if (!ok) return;
   try {

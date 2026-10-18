@@ -27,7 +27,7 @@ use crate::media::{masters_in, native_proxy_of, rel_stem, under};
 use crate::model::{Mark, MoveResult};
 use crate::rclone;
 use crate::review::{read_marks, update_marks, write_marks};
-use crate::store::{now_epoch, FileSet, Pending, PendingOp};
+use crate::store::{forget_in_cloud_cache, now_epoch, FileSet, Pending, PendingOp};
 use crate::trips::{set_trip_meta, trip_meta};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -526,6 +526,8 @@ fn retarget_baseline(cfg: &Config, plans: &[&Plan], dest: &str) {
                 b.remove(rel);
             }
         });
+        // The source's cached listing still holds them; the cloud no longer does.
+        forget_in_cloud_cache(&cfg.cloud_cache_path(&trip), &rels);
     }
 }
 
@@ -701,6 +703,11 @@ fn carry_orphan_cuts(src_dir: &Path, dst_dir: &Path, src_trip: &str) {
         let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
+        // Cut's bookkeeping for this folder, not a cut: the clips it listed are
+        // untracked in the destination, which is the safe side (see cut.rs).
+        if name == crate::cut::MANIFEST {
+            continue;
+        }
         let mut dst = dst_dir.join("clips").join(name);
         if dst.exists() {
             let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
@@ -716,9 +723,10 @@ fn carry_orphan_cuts(src_dir: &Path, dst_dir: &Path, src_trip: &str) {
 }
 
 /// Does this trip still hold something that can't be rebuilt? Caches
-/// (`.proxies/`, `_sheets/`), the `.reel` marker, `marks.tsv` (already migrated)
-/// and a `.kdenlive` project (regenerated from marks on demand) are all
-/// disposable; anything else is the user's and blocks the fold-away.
+/// (`.proxies/`, `_sheets/`), the `.reel` marker, `marks.tsv` (already migrated),
+/// Cut's `clips/.manifest` and a `.kdenlive` project (regenerated from marks on
+/// demand) are all disposable; anything else is the user's and blocks the
+/// fold-away.
 fn holds_originals(dir: &Path) -> bool {
     walkdir::WalkDir::new(dir)
         .into_iter()
@@ -731,7 +739,7 @@ fn holds_originals(dir: &Path) -> bool {
                 .components()
                 .any(|c| matches!(c.as_os_str().to_str(), Some(".proxies") | Some("_sheets")));
             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            let meta = matches!(name, ".reel" | "marks.tsv")
+            let meta = matches!(name, ".reel" | "marks.tsv" | crate::cut::MANIFEST)
                 || p.extension().and_then(|s| s.to_str()) == Some("kdenlive");
             !derived && !meta
         })

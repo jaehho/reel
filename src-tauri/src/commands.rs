@@ -3,10 +3,10 @@
 
 use reel_core::{
     ArchivePlan, ArchiveProgress, ArchiveResult, CardInfo, Config, Contributor, CutProgress,
-    CutResult, DeleteResult, DupProgress, DupReport, DupResolution, DupResolveResult,
-    ImportProgress, ImportResult, Mark, MoveResult, Playlist, PullProgress, PullResult,
-    PushProgress, PushResult, ReclaimPlan, ReclaimResult, Sharee, StillResult, SyncActions,
-    SyncProgress, SyncResult, TimelineResult, Trip, TripShare, TripSync, WipeProgress,
+    CutResult, DeletePreview, DeleteResult, DupProgress, DupReport, DupResolution,
+    DupResolveResult, ImportProgress, ImportResult, Mark, MoveResult, Playlist, PullProgress,
+    PullResult, PushProgress, PushResult, ReclaimPlan, ReclaimResult, Sharee, StillResult,
+    SyncActions, SyncProgress, SyncResult, TimelineResult, Trip, TripShare, TripSync, WipeProgress,
 };
 use std::path::Path;
 use tauri::ipc::Channel;
@@ -301,8 +301,9 @@ pub async fn make_proxy(trip: String, master: String) -> Result<String, String> 
 
 /// Cut a trip's marked ranges into `clips/` — one lossless ffmpeg stream-copy per
 /// mark, streaming per-segment progress over `channel`. Runs off the UI thread so
-/// the window stays live; an output that already exists is left as-is, so this is
-/// safe to re-run after adding more marks. `Err` only on a bad trip or no marks.
+/// the window stays live. Safe to re-run: `clips/` is reconciled with the marks as
+/// they are now (unchanged clips kept, trimmed ones re-cut, unmarked ones removed).
+/// `Err` only on a bad trip or no marks.
 #[tauri::command]
 pub async fn cut_trip(channel: Channel<CutProgress>, trip: String) -> Result<CutResult, String> {
     let cfg = Config::from_env();
@@ -434,6 +435,19 @@ pub async fn delete_clips(masters: Vec<String>) -> Result<DeleteResult, String> 
     {
         Ok(result) => result,
         Err(join) => Err(format!("delete task failed: {join}")),
+    }
+}
+
+/// What `delete_trip` would erase — local clips, and your cloud copies, which of
+/// those are the only copy — for the confirm to name. Read-only, no network.
+#[tauri::command]
+pub async fn delete_trip_preview(trip: String) -> Result<DeletePreview, String> {
+    let cfg = Config::from_env();
+    match tauri::async_runtime::spawn_blocking(move || reel_core::delete_trip_preview(&cfg, &trip))
+        .await
+    {
+        Ok(result) => result,
+        Err(join) => Err(format!("delete preview failed: {join}")),
     }
 }
 

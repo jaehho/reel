@@ -390,6 +390,24 @@ fn tier1_to_push(cfg: &Config, l: &FileSet, b: &FileSet, trip: &str) -> Vec<Sync
         .collect()
 }
 
+/// Your clips in this trip's cloud folder as this machine's own records have it,
+/// no network. A trip's purge takes the whole folder, so for a confirm that names
+/// the loss a clip too many beats one too few: the baseline (what you uploaded
+/// and verified; archive leaves it alone) joined with the last cloud listing,
+/// since a push moves B but not the cached R, and an other-machine upload shows
+/// only in R. With neither record, a `share=` flag means what's here went up.
+pub(crate) fn your_cloud_set(cfg: &Config, trip: &str, local: &FileSet) -> FileSet {
+    let base_p = cfg.base_path(trip);
+    let cache = load_cloud_cache(&cfg.cloud_cache_path(trip));
+    let mut known = FileSet::load(&base_p);
+    known.files.extend(cache.files.files);
+    if !base_p.exists() && cache.checked.is_none() && is_shared_flag(&cfg.lib.join(trip)) {
+        known = local.clone();
+    }
+    known.files.retain(|rel, _| person_of(rel) == cfg.user);
+    known
+}
+
 /// Compact status for the dashboard card — tier-1 "to share" always, plus the
 /// cloud-side buckets from the cache when one exists. Network-free.
 pub fn brief(cfg: &Config, trip: &str, masters: &[PathBuf], trip_dir: &Path) -> SyncBrief {

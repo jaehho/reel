@@ -482,6 +482,28 @@ pub struct DeleteResult {
     pub cloud_ok: bool,
 }
 
+/// What `delete_trip` would erase, read from local records (no network), so the
+/// confirm can say what goes and from where. An archived trip has no masters here
+/// but its whole footage in the cloud: `only_clips` is what a delete leaves
+/// nowhere.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletePreview {
+    /// Local masters removed.
+    pub masters: usize,
+    /// Bytes of the whole trip folder (masters, cut, marks) removed locally.
+    pub bytes: u64,
+    /// The trip is recorded as shared, so its purge will run.
+    pub shared: bool,
+    /// Your clips in the cloud that the purge erases (0 unless `shared`).
+    pub cloud_clips: usize,
+    pub cloud_bytes: u64,
+    /// Of those, the ones with no copy on this machine: the delete erases the
+    /// only copy.
+    pub only_clips: usize,
+    pub only_bytes: u64,
+}
+
 /// Which leg of a share push is running, so the UI can label the bar. Upload
 /// reports bytes; verify reports files checked.
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -732,15 +754,18 @@ pub struct CutProgress {
     pub count: usize,
 }
 
-/// Summary of a cut: clips newly written, marks skipped because their output was
-/// already there (the cut is additive and re-runnable), marks that failed, and
-/// where the clips landed.
+/// Summary of a cut: clips written, marks whose clip was already right (or only
+/// needed renaming), marks whose name is held by a file that is not Cut's own
+/// output (left alone, never overwritten), clips removed because no mark asks for
+/// them any more, marks that failed, and where the clips landed.
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct CutResult {
     pub trip: String,
     pub made: usize,
     pub skipped: usize,
+    pub kept: usize,
+    pub removed: usize,
     pub failed: usize,
     /// Absolute path of the trip's `clips/` directory.
     pub dir: String,

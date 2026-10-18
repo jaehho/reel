@@ -948,6 +948,10 @@ main {
   color: var(--muted);
   font-size: 13px;
 }
+/* the line of a destructive confirm that names a loss nothing else backs up */
+.dialog-meta .loss {
+  color: var(--warn);
+}
 .field {
   display: flex;
   flex-direction: column;

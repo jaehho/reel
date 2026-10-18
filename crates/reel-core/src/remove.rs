@@ -20,10 +20,11 @@ use crate::cards::card_roots;
 use crate::config::Config;
 use crate::ledger::{Ledger, Tombstones};
 use crate::media::{fileid_of, masters_in, masters_under, native_proxy_of, rel_stem, under};
-use crate::model::{DeleteResult, ReclaimResult};
+use crate::model::{DeletePreview, DeleteResult, ReclaimResult};
 use crate::rclone;
 use crate::review::update_marks;
-use crate::store::{now_epoch, FileSet, Pending, PendingOp};
+use crate::store::{forget_in_cloud_cache, now_epoch, FileSet, Pending, PendingOp};
+use crate::sync::{local_set_from, your_cloud_set};
 use crate::trips::trip_meta;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -155,6 +156,7 @@ pub fn delete_clips(cfg: &Config, masters: &[String]) -> Result<DeleteResult, St
     let mut cloud_ok = true;
     let mut removed_by_trip: HashMap<String, Vec<String>> = HashMap::new();
     let mut base_removes: HashMap<String, Vec<String>> = HashMap::new();
+    let mut cloud_removes: HashMap<String, Vec<String>> = HashMap::new();
 
     for d in &doomed {
         // local delete (double-checked to sit under the library)
@@ -175,6 +177,10 @@ pub fn delete_clips(cfg: &Config, masters: &[String]) -> Result<DeleteResult, St
             if online {
                 if rclone::delete_file(&format!("{remote}/{}/{}", d.trip, d.rel)).unwrap_or(false) {
                     in_cloud += 1;
+                    cloud_removes
+                        .entry(d.trip.clone())
+                        .or_default()
+                        .push(d.rel.clone());
                 } else {
                     cloud_ok = false;
                 }
@@ -236,6 +242,12 @@ pub fn delete_clips(cfg: &Config, masters: &[String]) -> Result<DeleteResult, St
             }
         });
     }
+    // The cached listing too, for what the cloud really lost: it is only rewritten
+    // by a live listing, so left alone it keeps counting the clip. A cloud delete
+    // that did not land is not in `cloud_removes` — the copy is still up there.
+    for (trip, rels) in &cloud_removes {
+        forget_in_cloud_cache(&cfg.cloud_cache_path(trip), rels);
+    }
 
     if deleted > 0 || in_cloud > 0 {
         crate::log::event(
@@ -267,10 +279,8 @@ fn dir_bytes(dir: &Path) -> u64 {
         .sum()
 }
 
-/// Permanently delete a whole trip: remove its local directory outright, tombstone
-/// every clip it owned, and — if it was shared — purge *your* contribution from
-/// the cloud (other contributors' cloud footage stays). Refuses a bad/unknown trip.
-pub fn delete_trip(cfg: &Config, trip: &str) -> Result<DeleteResult, String> {
+/// The trip directory `delete_trip` may remove, or why it won't.
+fn deletable_trip(cfg: &Config, trip: &str) -> Result<PathBuf, String> {
     if !valid_trip(trip) {
         return Err(format!("invalid trip name: {trip:?}"));
     }
@@ -281,10 +291,60 @@ pub fn delete_trip(cfg: &Config, trip: &str) -> Result<DeleteResult, String> {
     if !under(&dir, &cfg.lib) {
         return Err("refusing to delete outside the library".into());
     }
+    Ok(dir)
+}
 
-    let masters = masters_in(&dir).len();
-    let bytes = dir_bytes(&dir);
-    let shared = is_shared(&dir);
+/// What deleting `trip` removes and from where. The local figures come off disk;
+/// the cloud ones from the baseline and last listing (`your_cloud_set`), so an
+/// archived trip — no masters here, its footage in the cloud — still shows what
+/// the purge takes. Only a shared trip's purge runs, hence zeros otherwise.
+fn preview_of(cfg: &Config, trip: &str, dir: &Path) -> DeletePreview {
+    let masters = masters_in(dir);
+    let shared = is_shared(dir);
+    let mut p = DeletePreview {
+        masters: masters.len(),
+        bytes: dir_bytes(dir),
+        shared,
+        cloud_clips: 0,
+        cloud_bytes: 0,
+        only_clips: 0,
+        only_bytes: 0,
+    };
+    if shared {
+        let local = local_set_from(&masters, dir);
+        for (rel, size) in &your_cloud_set(cfg, trip, &local).files {
+            p.cloud_clips += 1;
+            p.cloud_bytes += size;
+            if !local.contains(rel) {
+                p.only_clips += 1;
+                p.only_bytes += size;
+            }
+        }
+    }
+    p
+}
+
+/// What `delete_trip` would erase, for the confirm to name. Network-free and
+/// read-only; refuses what `delete_trip` refuses.
+pub fn delete_trip_preview(cfg: &Config, trip: &str) -> Result<DeletePreview, String> {
+    let dir = deletable_trip(cfg, trip)?;
+    Ok(preview_of(cfg, trip, &dir))
+}
+
+/// Permanently delete a whole trip: remove its local directory outright, tombstone
+/// every clip it owned, and — if it was shared — purge *your* contribution from
+/// the cloud (other contributors' cloud footage stays). Refuses a bad/unknown trip.
+pub fn delete_trip(cfg: &Config, trip: &str) -> Result<DeleteResult, String> {
+    let dir = deletable_trip(cfg, trip)?;
+
+    // Read before the directory and its baseline go.
+    let DeletePreview {
+        masters,
+        bytes,
+        shared,
+        cloud_clips,
+        ..
+    } = preview_of(cfg, trip, &dir);
 
     // Content ids this trip owns, so a copy still on a card reads as discarded.
     // Read now, applied after the directory goes — each under the state lock, so a
@@ -321,7 +381,7 @@ pub fn delete_trip(cfg: &Config, trip: &str) -> Result<DeleteResult, String> {
             let me = cfg.user_scope()?;
             let path = format!("{}/{}/{}", cfg.remote.trim_end_matches('/'), trip, me);
             if rclone::purge(&path).unwrap_or(false) {
-                in_cloud = masters;
+                in_cloud = cloud_clips;
             } else {
                 cloud_ok = false;
             }

@@ -366,6 +366,22 @@ pub fn save_cloud_cache(path: &Path, checked: i64, files: &FileSet) -> io::Resul
     write_atomic(path, &s)
 }
 
+/// Drop `rels` from a cached cloud listing, for clips that just left the cloud
+/// folder it describes. The cache is only rewritten by a live listing, so an op
+/// that removes a clip must edit it too or the clip keeps counting (a delete
+/// confirm would name footage that is gone, and a status would read the baseline
+/// drop as a zombie to clean). A trip never listed has no cache to correct.
+pub fn forget_in_cloud_cache(path: &Path, rels: &[String]) {
+    let cache = load_cloud_cache(path);
+    if let Some(checked) = cache.checked {
+        let mut files = cache.files;
+        for rel in rels {
+            files.remove(rel);
+        }
+        let _ = save_cloud_cache(path, checked, &files);
+    }
+}
+
 /// Write `body` to `path` through a temp sibling + rename, so a reader never sees
 /// a partial file. Mirrors `Ledger::save`.
 ///

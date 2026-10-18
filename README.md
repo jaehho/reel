@@ -69,10 +69,21 @@ The engine honours the same env knobs as the script (`REEL_LIB`, `REEL_REMOTE`,
   cached by content id) before deciding to import.
 - [x] **2 — Cut**: marked ranges → `clips/`, lossless (one ffmpeg stream-copy per
   mark, `-ss/-to` before `-i`, primary v+a only), with live per-clip progress on
-  the trip card. Additive and re-runnable: existing clips are left untouched, so
-  adding marks and cutting again only writes the new ones. **Edit** is the other
-  way out: the trip's marks become one `.kdenlive` timeline against the masters,
-  launched detached. Cut writes standalone files; Edit is where you go to work.
+  the trip card. Re-runnable: `clips/` is brought in line with the marks as they
+  are now. A clip whose mark hasn't changed is left untouched, a trimmed mark is
+  cut again, a relabelled or renumbered one has its clip renamed, and a clip no
+  mark asks for is removed (the toast says how many). Only a clip Cut itself made
+  can go or be cut over, and only while it is still as Cut left it
+  (`clips/.manifest` keeps each clip's mark, size and mtime), only while its
+  master is still on disk, and only after a run where nothing failed. Cuts
+  carried in from a pruned duplicate, files you put there, the finished cuts of a
+  deleted master, and clips you have since re-encoded or graded in place are
+  never touched; one sitting at a name a mark wants is counted in the toast as
+  left alone, and deleting it lets the next Cut make it afresh. That includes
+  clips left by versions before the manifest.
+  **Edit** is the other way out: the trip's marks become one `.kdenlive`
+  timeline against the masters, launched detached. Cut writes standalone files;
+  Edit is where you go to work.
 - [x] **3 — Import + session picker + cloud**: card→workspace copy + ledger write,
   then rclone push/verify to the shared cloud. Import is session-scoped with live
   progress, dedup, and capture-time preserved; **Share** uploads your masters,
@@ -92,7 +103,9 @@ The engine honours the same env knobs as the script (`REEL_LIB`, `REEL_REMOTE`,
   trips (in the player with `m`, or a multi-select **organize board** you drag onto
   a destination), **rename**/**merge** trips, and **permanently delete** clips or a
   whole trip — locally *and* from the cloud for your own footage, **tombstoned** so a
-  copy still on a card reads "discarded" and never re-imports. **Pull** others'
+  copy still on a card reads "discarded" and never re-imports (deleting a trip
+  names what goes from where, and asks you to type its name when the cloud holds
+  the only copy, as with an archived trip). **Pull** others'
   footage down from the cloud into a trip; a per-clip provenance badge plus the trip
   card show whose is whose. Every relocation keeps files, ledger, marks, cut clips,
   and cloud in step, and never claims a cloud safety it can't prove (an offline move
