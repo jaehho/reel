@@ -27,7 +27,7 @@ use crate::media::{masters_in, native_proxy_of, rel_stem, under};
 use crate::model::{Mark, MoveResult};
 use crate::rclone;
 use crate::review::{read_marks, update_marks, write_marks};
-use crate::store::{now_epoch, FileSet, Pending, PendingOp};
+use crate::store::{forget_in_cloud_cache, now_epoch, FileSet, Pending, PendingOp};
 use crate::trips::{set_trip_meta, trip_meta};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -526,6 +526,8 @@ fn retarget_baseline(cfg: &Config, plans: &[&Plan], dest: &str) {
                 b.remove(rel);
             }
         });
+        // The source's cached listing still holds them; the cloud no longer does.
+        forget_in_cloud_cache(&cfg.cloud_cache_path(&trip), &rels);
     }
 }
 

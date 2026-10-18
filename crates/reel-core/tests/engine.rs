@@ -2962,6 +2962,86 @@ fn deleting_an_archived_trip_reports_the_cloud_copy_it_erases() {
     assert!(!up.exists(), "and it really was erased");
 }
 
+/// Two clips pushed, then the cloud listed (the Sync panel's refresh), so the
+/// cached listing holds both. Returns the masters in sorted order.
+fn two_pushed_and_listed(d: &Path) -> (PathBuf, Config, Vec<String>) {
+    let (_lib, cloud, c, trip) = sync_env(d);
+    touch(
+        &trip.join("jaeho/dji/DJI_0002.MP4"),
+        2,
+        3_000_000,
+        1_700_000_100,
+    );
+    reel_core::push_trip(&c, "bali", |_| {}).expect("push");
+    reel_core::sync_status(&c, "bali", true).expect("list the cloud");
+    let masters = ["DJI_0001.MP4", "DJI_0002.MP4"]
+        .map(|n| trip.join("jaeho/dji").join(n).display().to_string());
+    (cloud, c, masters.to_vec())
+}
+
+/// The listing cached before an op that takes a clip out of the cloud folder
+/// must not keep counting it: the delete confirm names clips that are gone from
+/// this trip's folder, and its typed-name gate fires for them.
+#[test]
+fn delete_preview_forgets_clips_moved_out_of_the_trip() {
+    if !have_rclone() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (cloud, c, masters) = two_pushed_and_listed(d.path());
+    reel_core::move_clips(&c, &masters[..1], "oslo").expect("move");
+    assert!(cloud.join("oslo/jaeho/dji/DJI_0001.MP4").is_file());
+
+    let p = reel_core::delete_trip_preview(&c, "bali").expect("preview");
+    assert_eq!(p.masters, 1, "one clip is still here");
+    assert_eq!(
+        (p.cloud_clips, p.cloud_bytes),
+        (1, 3_000_000),
+        "the moved clip is no longer in bali's cloud folder"
+    );
+    assert_eq!(p.only_clips, 0, "the clip left in bali has a copy here");
+}
+
+#[test]
+fn delete_preview_forgets_clips_deleted_from_the_cloud() {
+    if !have_rclone() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (cloud, c, masters) = two_pushed_and_listed(d.path());
+    let r = reel_core::delete_clips(&c, &masters[..1]).expect("delete");
+    assert!(r.cloud_ok && r.in_cloud == 1);
+    assert!(!cloud.join("bali/jaeho/dji/DJI_0001.MP4").exists());
+
+    let p = reel_core::delete_trip_preview(&c, "bali").expect("preview");
+    assert_eq!((p.cloud_clips, p.cloud_bytes), (1, 3_000_000));
+    assert_eq!(p.only_clips, 0);
+
+    let r = reel_core::delete_trip(&c, "bali").expect("delete trip");
+    assert_eq!(r.in_cloud, 1, "the toast counts what the purge erased");
+    assert!(!cloud.join("bali/jaeho").exists());
+}
+
+/// A cloud delete that did not land leaves the clip up there, so the purge
+/// still erases it and the preview must still name it.
+#[test]
+fn delete_preview_keeps_a_clip_whose_cloud_delete_did_not_land() {
+    if !have_rclone() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (cloud, c, masters) = two_pushed_and_listed(d.path());
+    let mut off = c.clone();
+    off.remote = "reel_absent_remote_z:cloud".into();
+    let r = reel_core::delete_clips(&off, &masters[..1]).expect("delete");
+    assert!(!r.cloud_ok);
+    assert!(cloud.join("bali/jaeho/dji/DJI_0001.MP4").is_file());
+
+    let p = reel_core::delete_trip_preview(&c, "bali").expect("preview");
+    assert_eq!(p.cloud_clips, 2, "both are still in the cloud");
+    assert_eq!((p.only_clips, p.only_bytes), (1, 2_000_000));
+}
+
 fn shared_trip(d: &Path) -> (PathBuf, Config) {
     let lib = d.join("Videos");
     let state = d.join("state");

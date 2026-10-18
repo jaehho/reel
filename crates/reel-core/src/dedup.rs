@@ -24,7 +24,7 @@ use crate::model::{
     DupCopy, DupGroup, DupLoc, DupProgress, DupReport, DupResolution, DupResolveResult,
 };
 use crate::rclone;
-use crate::store::{load_cloud_cache, save_cloud_cache, FileSet};
+use crate::store::{forget_in_cloud_cache, FileSet};
 use crate::trips::trip_dirs;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -400,15 +400,7 @@ pub fn resolve(
             }
         });
 
-        let pc = cfg.cloud_cache_path(trip);
-        let cache = load_cloud_cache(&pc);
-        if let Some(checked) = cache.checked {
-            let mut files = cache.files;
-            for rel in rels {
-                files.remove(rel);
-            }
-            let _ = save_cloud_cache(&pc, checked, &files);
-        }
+        forget_in_cloud_cache(&cfg.cloud_cache_path(trip), rels);
     }
     let _ = Ledger::update(&cfg.ledger_path(), |l| {
         for (id, trip, rel) in &repoints {

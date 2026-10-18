@@ -23,7 +23,7 @@ use crate::media::{fileid_of, masters_in, masters_under, native_proxy_of, rel_st
 use crate::model::{DeletePreview, DeleteResult, ReclaimResult};
 use crate::rclone;
 use crate::review::update_marks;
-use crate::store::{now_epoch, FileSet, Pending, PendingOp};
+use crate::store::{forget_in_cloud_cache, now_epoch, FileSet, Pending, PendingOp};
 use crate::sync::{local_set_from, your_cloud_set};
 use crate::trips::trip_meta;
 use std::collections::HashMap;
@@ -156,6 +156,7 @@ pub fn delete_clips(cfg: &Config, masters: &[String]) -> Result<DeleteResult, St
     let mut cloud_ok = true;
     let mut removed_by_trip: HashMap<String, Vec<String>> = HashMap::new();
     let mut base_removes: HashMap<String, Vec<String>> = HashMap::new();
+    let mut cloud_removes: HashMap<String, Vec<String>> = HashMap::new();
 
     for d in &doomed {
         // local delete (double-checked to sit under the library)
@@ -176,6 +177,10 @@ pub fn delete_clips(cfg: &Config, masters: &[String]) -> Result<DeleteResult, St
             if online {
                 if rclone::delete_file(&format!("{remote}/{}/{}", d.trip, d.rel)).unwrap_or(false) {
                     in_cloud += 1;
+                    cloud_removes
+                        .entry(d.trip.clone())
+                        .or_default()
+                        .push(d.rel.clone());
                 } else {
                     cloud_ok = false;
                 }
@@ -236,6 +241,12 @@ pub fn delete_clips(cfg: &Config, masters: &[String]) -> Result<DeleteResult, St
                 base.remove(rel);
             }
         });
+    }
+    // The cached listing too, for what the cloud really lost: it is only rewritten
+    // by a live listing, so left alone it keeps counting the clip. A cloud delete
+    // that did not land is not in `cloud_removes` — the copy is still up there.
+    for (trip, rels) in &cloud_removes {
+        forget_in_cloud_cache(&cfg.cloud_cache_path(trip), rels);
     }
 
     if deleted > 0 || in_cloud > 0 {
