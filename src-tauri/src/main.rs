@@ -168,6 +168,7 @@ fn main() {
             commands::rename_trip,
             commands::merge_trips,
             commands::delete_clips,
+            commands::delete_trip_preview,
             commands::delete_trip,
             commands::clear_discarded,
             commands::cloud_contributors,

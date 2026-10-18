@@ -3,10 +3,10 @@
 
 use reel_core::{
     ArchivePlan, ArchiveProgress, ArchiveResult, CardInfo, Config, Contributor, CutProgress,
-    CutResult, DeleteResult, DupProgress, DupReport, DupResolution, DupResolveResult,
-    ImportProgress, ImportResult, Mark, MoveResult, Playlist, PullProgress, PullResult,
-    PushProgress, PushResult, ReclaimPlan, ReclaimResult, Sharee, StillResult, SyncActions,
-    SyncProgress, SyncResult, TimelineResult, Trip, TripShare, TripSync, WipeProgress,
+    CutResult, DeletePreview, DeleteResult, DupProgress, DupReport, DupResolution,
+    DupResolveResult, ImportProgress, ImportResult, Mark, MoveResult, Playlist, PullProgress,
+    PullResult, PushProgress, PushResult, ReclaimPlan, ReclaimResult, Sharee, StillResult,
+    SyncActions, SyncProgress, SyncResult, TimelineResult, Trip, TripShare, TripSync, WipeProgress,
 };
 use std::path::Path;
 use tauri::ipc::Channel;
@@ -434,6 +434,19 @@ pub async fn delete_clips(masters: Vec<String>) -> Result<DeleteResult, String> 
     {
         Ok(result) => result,
         Err(join) => Err(format!("delete task failed: {join}")),
+    }
+}
+
+/// What `delete_trip` would erase — local clips, and your cloud copies, which of
+/// those are the only copy — for the confirm to name. Read-only, no network.
+#[tauri::command]
+pub async fn delete_trip_preview(trip: String) -> Result<DeletePreview, String> {
+    let cfg = Config::from_env();
+    match tauri::async_runtime::spawn_blocking(move || reel_core::delete_trip_preview(&cfg, &trip))
+        .await
+    {
+        Ok(result) => result,
+        Err(join) => Err(format!("delete preview failed: {join}")),
     }
 }
 

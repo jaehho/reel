@@ -92,7 +92,9 @@ The engine honours the same env knobs as the script (`REEL_LIB`, `REEL_REMOTE`,
   trips (in the player with `m`, or a multi-select **organize board** you drag onto
   a destination), **rename**/**merge** trips, and **permanently delete** clips or a
   whole trip — locally *and* from the cloud for your own footage, **tombstoned** so a
-  copy still on a card reads "discarded" and never re-imports. **Pull** others'
+  copy still on a card reads "discarded" and never re-imports (deleting a trip
+  names what goes from where, and asks you to type its name when the cloud holds
+  the only copy, as with an archived trip). **Pull** others'
   footage down from the cloud into a trip; a per-clip provenance badge plus the trip
   card show whose is whose. Every relocation keeps files, ledger, marks, cut clips,
   and cloud in step, and never claims a cloud safety it can't prove (an offline move

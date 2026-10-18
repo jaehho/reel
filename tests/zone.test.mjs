@@ -145,5 +145,129 @@ check("a renamed mark is not a highlight", touch([hl(4, 14, { label: "waterfall"
 check("an i/o mark is not a highlight", touch([hl(4, 14, { label: "" })], 5, 15), -1);
 check("the latest overlapping highlight wins", touch([hl(0, 10), hl(5, 15)], 8, 12), 1);
 
+// Deleting a trip must say what it erases and from where, and make you type the
+// name when the cloud holds the only copy (#52). An archived trip has no local
+// clips, and its confirm used to read "0 clips" over all of its footage. The
+// real functions, with the dialog as a fake.
+const GIB = 1073741824;
+const delCode = [
+  grab(/const HTML_ESCAPES = [\s\S]*?\};/, "HTML_ESCAPES"),
+  ...["esc", "plural", "fmtBytes", "deleteTripPlan", "deleteSummary", "confirmDanger"].map((n) =>
+    grab(new RegExp(`function ${n}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}`), n)
+  ),
+].join("\n");
+const fakeEl = () => {
+  const on = {};
+  return {
+    hidden: false,
+    disabled: false,
+    value: "",
+    open: false,
+    focused: false,
+    addEventListener: (t, f) => (on[t] ||= []).push(f),
+    removeEventListener: (t, f) => (on[t] = (on[t] || []).filter((g) => g !== f)),
+    fire(t, ev = {}) {
+      for (const f of [...(on[t] || [])]) f(ev);
+    },
+    focus() {
+      this.focused = true;
+    },
+    showModal() {
+      this.open = true;
+    },
+    close() {
+      this.open = false;
+      this.fire("close");
+    },
+  };
+};
+const tripDelete = () => {
+  const els = {};
+  const $ = (sel) => (els[sel] ||= fakeEl());
+  for (const id of ["#danger-go", "#danger-cancel", "#danger-type", "#danger-type-field"]) $(id);
+  const api = new Function("$", "dangerDlg", `${delCode}; return { deleteTripPlan, deleteSummary, confirmDanger };`)(
+    $,
+    $("#danger-dialog")
+  );
+  return { ...api, els };
+};
+const settled = async (p) => {
+  let out = "pending";
+  p.then((v) => (out = v));
+  await new Promise((r) => setImmediate(r));
+  return out;
+};
+const td = tripDelete();
+
+const archived = { masters: 0, bytes: 180 * 1048576, shared: true, cloudClips: 64, cloudBytes: 58 * GIB, onlyClips: 64, onlyBytes: 58 * GIB };
+let plan = td.deleteTripPlan("kyoto", archived);
+check("archived: names the only copy", plan.body.includes("only copy of 64 clips (58.0 GiB)"), true);
+check("archived: says nothing is raw here", plan.body.includes("no raw clips here"), true);
+check("archived: says where it is erased from", plan.body.includes("Also erased from the cloud: your 64 clips"), true);
+check("archived: never claims 0 clips", plan.body.includes("0 clips"), false);
+check("archived: the name must be typed", plan.typed, "kyoto");
+
+const everywhere = { ...archived, masters: 12, onlyClips: 0, onlyBytes: 0, cloudClips: 12 };
+plan = td.deleteTripPlan("bali", everywhere);
+check("local copies too: cloud line, no only-copy claim", json([plan.body.includes("Also erased from the cloud"), plan.body.includes("only copy")]), json([true, false]));
+check("local copies too: no typed name", plan.typed, null);
+check("local copies too: counts the local clips", plan.body.includes("12 clips, its cut, and marks"), true);
+
+plan = td.deleteTripPlan("bali", { masters: 3, bytes: GIB, shared: false, cloudClips: 0, cloudBytes: 0, onlyClips: 0, onlyBytes: 0 });
+check("unshared: no cloud line", json([plan.body.includes("cloud"), plan.typed]), json([false, null]));
+plan = td.deleteTripPlan("a", { ...archived, onlyClips: 1, onlyBytes: GIB, cloudClips: 1 });
+check("one clip reads singular", plan.body.includes("only copy of 1 clip (1.0 GiB). It's in the cloud"), true);
+plan = td.deleteTripPlan("<b>&x", archived);
+check("the name is escaped in the body but typed raw", json([plan.body.includes("<b>"), plan.body.includes("&lt;b&gt;&amp;x"), plan.typed]), json([false, true, "<b>&x"]));
+
+const sum = (r) => td.deleteSummary({ deleted: 0, bytes: 0, inCloud: 0, keptCloud: 0, cloudOk: true, ...r });
+check("toast: archived trip leads with the cloud", sum({ bytes: 180 * 1048576, inCloud: 64 }), "Deleted the trip · 180 MiB · 64 clips from the cloud");
+check("toast: ordinary delete is unchanged in shape", sum({ deleted: 3, bytes: GIB, inCloud: 3 }), "Deleted 3 clips · 1.0 GiB · 3 clips from the cloud");
+check("toast: deleting nothing still says so", sum({}), "Deleted 0 clips");
+check("toast: a bare archived trip shows no 0 MiB", sum({ bytes: 2048, inCloud: 3 }), "Deleted the trip · 3 clips from the cloud");
+check("body: nor does the confirm", td.deleteTripPlan("k", { ...archived, bytes: 2048 }).body.includes("MiB)."), false);
+
+// The gate itself: disarmed until the exact name is typed, and Enter or a click
+// can't get around it.
+let dd = tripDelete();
+const go = dd.els["#danger-go"];
+const box = dd.els["#danger-type"];
+const key = (k) => {
+  const ev = { key: k, prevented: false, preventDefault() { this.prevented = true; } };
+  box.fire("keydown", ev);
+  return ev;
+};
+const typeInto = (v) => {
+  box.value = v;
+  box.fire("input");
+};
+let ask = dd.confirmDanger({ body: "x", typeToConfirm: "kyoto" });
+check("typed: the field shows, focused, and Delete starts disabled", json([dd.els["#danger-type-field"].hidden, box.focused, go.disabled]), json([false, true, true]));
+check("typed: Enter on an empty box is swallowed", key("Enter").prevented, true);
+go.fire("click");
+check("typed: nor does a click get through", await settled(ask), "pending");
+typeInto("kyot");
+check("typed: a partial name stays disarmed", go.disabled, true);
+typeInto("Kyoto");
+check("typed: case matters", go.disabled, true);
+typeInto(" kyoto ");
+check("typed: the full name arms it", go.disabled, false);
+go.fire("click");
+check("typed: and then it resolves true", await settled(ask), true);
+
+ask = dd.confirmDanger({ body: "x", typeToConfirm: "kyoto" });
+typeInto("kyoto");
+key("Enter");
+check("typed: Enter confirms once it matches", await settled(ask), true);
+ask = dd.confirmDanger({ body: "x", typeToConfirm: "kyoto" });
+dd.els["#danger-cancel"].fire("click");
+check("typed: Cancel resolves false", await settled(ask), false);
+
+// ...and a plain confirm after a typed one must not inherit its gate.
+ask = dd.confirmDanger({ body: "x" });
+check("plain: no field, Delete enabled, Cancel focused", json([dd.els["#danger-type-field"].hidden, go.disabled, dd.els["#danger-cancel"].focused]), json([true, false, true]));
+go.fire("click");
+check("plain: one click confirms", await settled(ask), true);
+
 console.log(fails ? `\n${fails} failed` : `\nall passed`);
 process.exit(fails ? 1 : 0);

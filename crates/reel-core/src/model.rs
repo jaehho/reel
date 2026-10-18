@@ -482,6 +482,28 @@ pub struct DeleteResult {
     pub cloud_ok: bool,
 }
 
+/// What `delete_trip` would erase, read from local records (no network), so the
+/// confirm can say what goes and from where. An archived trip has no masters here
+/// but its whole footage in the cloud: `only_clips` is what a delete leaves
+/// nowhere.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletePreview {
+    /// Local masters removed.
+    pub masters: usize,
+    /// Bytes of the whole trip folder (masters, cut, marks) removed locally.
+    pub bytes: u64,
+    /// The trip is recorded as shared, so its purge will run.
+    pub shared: bool,
+    /// Your clips in the cloud that the purge erases (0 unless `shared`).
+    pub cloud_clips: usize,
+    pub cloud_bytes: u64,
+    /// Of those, the ones with no copy on this machine: the delete erases the
+    /// only copy.
+    pub only_clips: usize,
+    pub only_bytes: u64,
+}
+
 /// Which leg of a share push is running, so the UI can label the bar. Upload
 /// reports bytes; verify reports files checked.
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]

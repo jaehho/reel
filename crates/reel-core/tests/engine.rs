@@ -2696,6 +2696,130 @@ fn delete_trip_purges_only_your_pool_subtree() {
     );
 }
 
+/// #52: an archived trip has no masters here and its whole footage in the cloud, so
+/// the card said "0 clips" while the purge took the only copy. The preview names
+/// it, from local records alone, and the result counts what the purge erased.
+#[test]
+fn deleting_an_archived_trip_reports_the_cloud_copy_it_erases() {
+    if !have_rclone() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (_lib, cloud, c, trip) = sync_env(d.path());
+    reel_core::push_trip(&c, "bali", |_| {}).expect("push");
+    reel_core::commit_archive(&c, "bali", |_| {}).expect("archive");
+    let up = cloud.join("bali/jaeho/dji/DJI_0001.MP4");
+
+    let p = reel_core::delete_trip_preview(&c, "bali").expect("preview");
+    assert_eq!(p.masters, 0, "archived: nothing raw left here");
+    assert!(p.shared);
+    assert_eq!((p.cloud_clips, p.cloud_bytes), (1, 2_000_000));
+    assert_eq!(
+        (p.only_clips, p.only_bytes),
+        (1, 2_000_000),
+        "the cloud copy is the only copy"
+    );
+    assert!(up.is_file() && trip.is_dir(), "a preview deletes nothing");
+
+    let r = reel_core::delete_trip(&c, "bali").expect("delete trip");
+    assert_eq!(r.deleted, 0);
+    assert_eq!(r.in_cloud, 1, "the toast must count what the purge erased");
+    assert!(r.cloud_ok);
+    assert!(!up.exists(), "and it really was erased");
+}
+
+fn shared_trip(d: &Path) -> (PathBuf, Config) {
+    let lib = d.join("Videos");
+    let state = d.join("state");
+    fs::create_dir_all(&state).unwrap();
+    let trip = make_trip(&lib, "bali");
+    fs::write(trip.join(".reel"), "reel project\nshare=shared\n").unwrap();
+    (trip, cfg(&lib, &state, None))
+}
+
+fn baseline(c: &Config, rows: &[(&str, u64)]) {
+    let mut b = reel_core::store::FileSet::default();
+    for (rel, size) in rows {
+        b.insert(rel, *size);
+    }
+    b.save(&c.base_path("bali")).unwrap();
+}
+
+#[test]
+fn delete_preview_separates_local_copies_from_the_only_cloud_copy() {
+    let d = tempfile::tempdir().unwrap();
+    let (trip, c) = shared_trip(d.path());
+    // dji is still on this machine; gopro was archived; alice's is pulled
+    touch(&trip.join("jaeho/dji/DJI_0001.MP4"), 1, 2_000_000, 1);
+    touch(&trip.join("alice/dji/DJI_0050.MP4"), 2, 1_000_000, 1);
+    baseline(
+        &c,
+        &[
+            ("jaeho/dji/DJI_0001.MP4", 2_000_000),
+            ("jaeho/gopro/GX010001.MP4", 3_000_000),
+            ("alice/dji/DJI_0050.MP4", 1_000_000),
+        ],
+    );
+
+    let p = reel_core::delete_trip_preview(&c, "bali").expect("preview");
+    assert_eq!(p.masters, 2, "both local masters go, pulled one included");
+    assert_eq!(
+        (p.cloud_clips, p.cloud_bytes),
+        (2, 5_000_000),
+        "the purge takes your folder only, not alice's"
+    );
+    assert_eq!((p.only_clips, p.only_bytes), (1, 3_000_000));
+}
+
+#[test]
+fn delete_preview_counts_what_only_the_cloud_listing_knows() {
+    use reel_core::store::{save_cloud_cache, FileSet};
+    let d = tempfile::tempdir().unwrap();
+    let (trip, c) = shared_trip(d.path());
+    touch(&trip.join("jaeho/dji/DJI_0001.MP4"), 1, 2_000_000, 1);
+    baseline(&c, &[("jaeho/dji/DJI_0001.MP4", 2_000_000)]);
+    // uploaded from another machine: in the cloud, never in this baseline
+    let mut listing = FileSet::default();
+    listing.insert("jaeho/dji/DJI_0001.MP4", 2_000_000);
+    listing.insert("jaeho/gopro/GX010009.MP4", 4_000_000);
+    save_cloud_cache(&c.cloud_cache_path("bali"), 1_700_000_000, &listing).unwrap();
+
+    let p = reel_core::delete_trip_preview(&c, "bali").expect("preview");
+    assert_eq!((p.cloud_clips, p.cloud_bytes), (2, 6_000_000));
+    assert_eq!((p.only_clips, p.only_bytes), (1, 4_000_000));
+}
+
+#[test]
+fn delete_preview_has_no_cloud_side_for_an_unshared_trip() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    let trip = make_trip(&lib, "bali");
+    touch(&trip.join("jaeho/dji/DJI_0001.MP4"), 1, 2_000_000, 1);
+    let c = cfg(&lib, &state, None);
+    // a leftover baseline row must not read as a purge that will not run
+    baseline(&c, &[("jaeho/dji/DJI_0001.MP4", 2_000_000)]);
+
+    let p = reel_core::delete_trip_preview(&c, "bali").expect("preview");
+    assert_eq!(p.masters, 1);
+    assert!(!p.shared);
+    assert_eq!((p.cloud_clips, p.only_clips), (0, 0));
+    assert!(reel_core::delete_trip_preview(&c, "../bali").is_err());
+    assert!(reel_core::delete_trip_preview(&c, "nope").is_err());
+}
+
+#[test]
+fn delete_preview_trusts_the_share_flag_when_nothing_else_is_recorded() {
+    // shared before baselines existed: no B, no listing; what's here went up
+    let d = tempfile::tempdir().unwrap();
+    let (trip, c) = shared_trip(d.path());
+    touch(&trip.join("jaeho/dji/DJI_0001.MP4"), 1, 2_000_000, 1);
+
+    let p = reel_core::delete_trip_preview(&c, "bali").expect("preview");
+    assert_eq!((p.cloud_clips, p.only_clips), (1, 0));
+}
+
 // ---- pull: bring others' footage down from the cloud ----
 
 #[test]
