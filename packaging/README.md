@@ -8,6 +8,8 @@ Files:
 - `PKGBUILD` — the AUR recipe (VCS `-git` package, no release tags needed).
 - `.SRCINFO` — generated metadata AUR requires (`makepkg --printsrcinfo`).
 - `reel.desktop` — launcher entry, installed to `/usr/share/applications`.
+  `make install` installs a copy into `~/.local/share/applications` with
+  `Exec=` set to the live launcher.
 
 ## Prerequisite
 
@@ -53,16 +55,10 @@ re-touch the AUR when the recipe itself changes (deps, install layout):
 makepkg --printsrcinfo > .SRCINFO   # in this dir, then copy both to the AUR clone
 ```
 
-## Wire into dotfiles
+## The author's machine
 
-Once `reel-git` is on the AUR, add one line to `dotfiles/packages/arch/97-apps.txt`:
-
-```
-reel-git
-```
-
-Install it with `paru -S reel-git` like any other AUR package — no submodule, no
-special-casing.
+Runs from a checkout rather than this package: `make install` at the repo
+root (see the top-level README), so no dotfiles package entry is needed.
 
 ## Known warnings
 

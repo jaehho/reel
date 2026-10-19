@@ -1,0 +1,83 @@
+#!/bin/sh
+# reel from the working checkout. Installed by `make install` as `reel`
+# (see also asst's wrapper, which this mirrors). REEL_SRC points at another
+# tree.
+#
+# Rules this relies on:
+#   - with no binary yet, a failed build never runs (first install is exact)
+#   - with a binary already there, run it now and rebuild in the background,
+#     so opening the window never waits on a dirty cargo tree
+#   - exec, so the app is this process (signals, one PID, exit status)
+#   - build output lands in a log; GUI launches have no console
+set -eu
+
+# The checkout this was installed from. `make install` rewrites the
+# DEFAULT_ROOT line only; the @ROOT@ below stays a sentinel, so a run out
+# of scripts/ still recognizes an uninstalled copy.
+DEFAULT_ROOT="@ROOT@"
+if [ "$DEFAULT_ROOT" = "@ROOT@" ]; then
+  d=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+  if [ -f "$d/../Cargo.toml" ]; then
+    DEFAULT_ROOT=$(CDPATH= cd -- "$d/.." && pwd)
+  else
+    DEFAULT_ROOT="${HOME}/projects/reel"
+  fi
+fi
+ROOT="${REEL_SRC:-$DEFAULT_ROOT}"
+
+name=$(basename "$0")
+case "$name" in
+  reel) pkg=reel-tauri ;;  # the window
+  *)
+    echo "reel-live: run as reel, not '$name'" >&2
+    exit 127
+    ;;
+esac
+
+fail() {
+  echo "reel-live: $*" >&2
+  # Desktop launches have no console; say it somewhere the user will see.
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send -a reel -u critical "reel" "$*" 2>/dev/null || true
+  fi
+  exit 1
+}
+
+[ -f "$ROOT/Cargo.toml" ] || fail "no checkout at $ROOT (set REEL_SRC)"
+command -v cargo >/dev/null 2>&1 || fail "cargo not on PATH"
+
+# Keep the build output somewhere a failed launch can point at.
+log="${XDG_STATE_HOME:-$HOME/.local/state}/reel-live.log"
+mkdir -p "$(dirname "$log")"
+bin="$ROOT/target/release/$name"
+
+build() {
+  cargo build --release --manifest-path "$ROOT/Cargo.toml" -p "$pkg"
+}
+
+# Background rebuild: next launch picks up the tree. Failures stay in the log;
+# the running binary is left alone. Two launches serialize on cargo's lock.
+# nohup: exec would otherwise let the shell take the build down with it.
+rebuild_later() {
+  nohup sh -c '
+    log=$1 manifest=$2 pkg=$3
+    if ! cargo build --release --manifest-path "$manifest" -p "$pkg"; then
+      if command -v notify-send >/dev/null 2>&1; then
+        notify-send -a reel -u critical "reel" \
+          "background build failed; see $log" 2>/dev/null || true
+      fi
+    fi
+  ' sh "$log" "$ROOT/Cargo.toml" "$pkg" >>"$log" 2>&1 &
+}
+
+if [ -x "$bin" ]; then
+  rebuild_later
+  exec "$bin" "$@"
+fi
+
+# Nothing to run yet: build here, and do not start on a failed build.
+if ! build >"$log" 2>&1; then
+  fail "build failed; see $log"
+fi
+[ -x "$bin" ] || fail "build left no $bin; see $log"
+exec "$bin" "$@"

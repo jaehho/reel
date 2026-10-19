@@ -1,0 +1,134 @@
+#!/bin/sh
+# What reel-live must do: never run a missing binary after a failed first
+# build; with a binary present, run it now and rebuild in the background;
+# never run a name that is not reel.
+set -eu
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+mkdir -p "$tmp/bin" "$tmp/src/target/release"
+# Cargo that always fails.
+cat >"$tmp/bin/cargo" <<'EOT'
+#!/bin/sh
+exit 1
+EOT
+chmod +x "$tmp/bin/cargo"
+# A notify-send that records instead of reaching the desktop.
+cat >"$tmp/bin/notify-send" <<'EOT'
+#!/bin/sh
+echo "notified:$*" >>"$NOTIFIED"
+EOT
+chmod +x "$tmp/bin/notify-send"
+# A binary that would leave a mark if anyone ran it.
+cat >"$tmp/src/target/release/reel" <<'EOT'
+#!/bin/sh
+echo ran >>"$MARKER"
+EOT
+chmod +x "$tmp/src/target/release/reel"
+touch "$tmp/src/Cargo.toml"
+
+# Invoke as `reel`, the way PATH and the desktop file do.
+ln -s "$here/reel-live" "$tmp/bin/reel"
+
+export MARKER="$tmp/marker"
+export NOTIFIED="$tmp/notified"
+export REEL_SRC="$tmp/src"
+export PATH="$tmp/bin:$PATH"
+export XDG_STATE_HOME="$tmp/state"
+
+# First install: no binary yet, failed build must not run anything.
+rm -f "$tmp/src/target/release/reel"
+if out=$("$tmp/bin/reel" 2>&1); then
+  echo "FAIL: expected a non-zero exit when the first build fails" >&2
+  exit 1
+fi
+if [ -e "$MARKER" ]; then
+  echo "FAIL: something ran after a failed first build" >&2
+  exit 1
+fi
+case $out in
+  *"build failed"*) ;;
+  *)
+    echo "FAIL: no build-failed message; got: $out" >&2
+    exit 1
+    ;;
+esac
+grep -q '^notified:.*build failed' "$NOTIFIED" || {
+  echo "FAIL: no desktop notification for the failed build" >&2
+  exit 1
+}
+
+# Wrong name: refuse, and do not build.
+cat >"$tmp/bin/cargo" <<'EOT'
+#!/bin/sh
+echo built >>"$MARKER"
+EOT
+chmod +x "$tmp/bin/cargo"
+ln -s "$here/reel-live" "$tmp/bin/nope"
+if out=$("$tmp/bin/nope" 2>&1); then
+  echo "FAIL: expected a non-zero exit for an unknown name" >&2
+  exit 1
+fi
+if [ -e "$MARKER" ]; then
+  echo "FAIL: built for a name that is not reel" >&2
+  exit 1
+fi
+
+# Binary present: run it now (args preserved) even if the background build fails.
+cat >"$tmp/bin/cargo" <<'EOT'
+#!/bin/sh
+echo built >>"$MARKER"
+sleep 0.2
+exit 1
+EOT
+chmod +x "$tmp/bin/cargo"
+cat >"$tmp/src/target/release/reel" <<'EOT'
+#!/bin/sh
+echo "args:$*" >>"$MARKER"
+EOT
+chmod +x "$tmp/src/target/release/reel"
+: >"$MARKER"
+if ! out=$("$tmp/bin/reel" one two 2>&1); then
+  echo "FAIL: existing binary did not run: $out" >&2
+  exit 1
+fi
+# The foreground is only the binary; cargo runs in the background.
+grep -q '^args:one two$' "$MARKER" || {
+  echo "FAIL: did not exec the binary with our args; got $(cat "$MARKER")" >&2
+  exit 1
+}
+# Wait briefly for the background build to touch MARKER (and then fail).
+sleep 0.5
+grep -q '^built$' "$MARKER" || {
+  echo "FAIL: did not kick a background rebuild; got $(cat "$MARKER")" >&2
+  exit 1
+}
+
+# After `make install`, the baked-in tree wins over $HOME/projects/reel,
+# and the sentinel must not have eaten the fallback check.
+sed "s|^DEFAULT_ROOT=\"@ROOT@\"|DEFAULT_ROOT=\"$tmp/src\"|" \
+  "$here/reel-live" >"$tmp/bin/installed"
+chmod 755 "$tmp/bin/installed"
+# A copy under the name `reel`, not a symlink back at scripts/.
+rm -f "$tmp/bin/reel"
+cp "$tmp/bin/installed" "$tmp/bin/reel"
+: >"$MARKER"
+if ! out=$(HOME="$tmp/home" REEL_SRC= PATH="$tmp/bin:$PATH" \
+  XDG_STATE_HOME="$tmp/state" MARKER="$MARKER" "$tmp/bin/reel" x 2>&1); then
+  echo "FAIL: installed wrapper exited non-zero: $out" >&2
+  exit 1
+fi
+grep -q '^args:x$' "$MARKER" || {
+  echo "FAIL: installed wrapper did not use the baked-in tree; got $(cat "$MARKER")" >&2
+  exit 1
+}
+
+# The source tree must still be the uninstalled template.
+grep -q 'DEFAULT_ROOT="@ROOT@"' "$here/reel-live" || {
+  echo "FAIL: scripts/reel-live lost its @ROOT@ sentinel" >&2
+  exit 1
+}
+
+echo "reel-live: ok"

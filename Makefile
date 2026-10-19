@@ -2,16 +2,21 @@
 # The frontend is static and embedded at compile time, so `cargo run` is all you
 # need to launch the app; npm/tauri-cli only come in for release bundling.
 
-.PHONY: run test build fmt clean dump logs errors perf
+.PHONY: run test test-live build install uninstall fmt clean dump logs errors perf
 
+PREFIX  ?= $(HOME)/.local
+DATADIR ?= $(or $(XDG_DATA_HOME),$(HOME)/.local/share)
 REEL_LOG := $(or $(XDG_STATE_HOME),$(HOME)/.local/state)/reel/log/reel.jsonl
 
 run: ## launch the app (debug build)
 	cargo run -p reel-tauri
 
-test: ## engine + UI-logic tests — headless, fast, no GUI deps
+test: test-live ## engine + UI-logic tests — headless, fast, no GUI deps
 	cargo test -p reel-core
 	node tests/zone.test.mjs
+
+test-live: ## the install launcher never runs a failed build
+	scripts/test-reel-live
 
 logs: ## follow the app log (UI + engine, newest last)
 	@tail -n 50 -F $(REEL_LOG)
@@ -34,6 +39,32 @@ reproxy: ## rebuild already-cached proxies on the current recipe (see proxy.rs)
 
 build: ## optimized release binary -> target/release/reel
 	cargo build -p reel-tauri --release
+
+install: ## live launcher in ~/.local for this user (no sudo)
+	# Each launch runs the checkout's last build and rebuilds the tree
+	# for the next one. @ROOT@ becomes the checkout that installed it.
+	# The desktop entry gets the absolute launcher path: desktop
+	# launchers may not have ~/.local/bin on PATH.
+	install -d $(PREFIX)/bin
+	sed 's|^DEFAULT_ROOT="@ROOT@"|DEFAULT_ROOT="$(CURDIR)"|' \
+		scripts/reel-live > $(PREFIX)/bin/reel
+	chmod 755 $(PREFIX)/bin/reel
+	mkdir -p $(DATADIR)/applications
+	sed 's#^Exec=reel#Exec=$(PREFIX)/bin/reel#' packaging/reel.desktop \
+		> $(DATADIR)/applications/reel.desktop
+	install -Dm644 src-tauri/icons/128x128.png \
+		$(DATADIR)/icons/hicolor/128x128/apps/reel.png
+	install -Dm644 src-tauri/icons/32x32.png \
+		$(DATADIR)/icons/hicolor/32x32/apps/reel.png
+	update-desktop-database $(DATADIR)/applications 2>/dev/null || true
+	@echo "installed. reel launches from $(PREFIX)/bin/reel"
+
+uninstall: ## remove the user install (footage, config and logs stay)
+	rm -f $(PREFIX)/bin/reel \
+	      $(DATADIR)/applications/reel.desktop \
+	      $(DATADIR)/icons/hicolor/128x128/apps/reel.png \
+	      $(DATADIR)/icons/hicolor/32x32/apps/reel.png
+	update-desktop-database $(DATADIR)/applications 2>/dev/null || true
 
 fmt:
 	cargo fmt
