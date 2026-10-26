@@ -278,6 +278,36 @@ check("toast: an action button carries its label", act && act.text, "Open folder
 act.onclick();
 check("toast: clicking it runs the action", acted, 1);
 
+// Import destinations (#54): one name for every new session, defaulted to the
+// last trip used, and a near-match warning when the typed name folds onto an
+// existing trip — "Ha Giang" beside "ha-giang" used to silently split a trip.
+const impCode = [
+  grab(/function foldTripName\(s\) \{[\s\S]*?\n\}/, "foldTripName"),
+  grab(/function importDestBadge\(name, trips\) \{[\s\S]*?\n\}/, "importDestBadge"),
+  grab(/function importDefaultName\(sessions\) \{[\s\S]*?\n\}/, "importDefaultName"),
+].join("\n");
+const impApi = (last) => {
+  const stubs = {
+    plural: (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`,
+    isoDay: (sec) => `day-${sec}`,
+    lastImportTrip: last,
+  };
+  const names = Object.keys(stubs);
+  return new Function(...names, `${impCode}; return { foldTripName, importDestBadge, importDefaultName };`)(
+    ...names.map((k) => stubs[k])
+  );
+};
+const i0 = impApi(null);
+check("import: a fresh name is a new trip", i0.importDestBadge("ha-giang", [{ name: "kyoto", masters: 3 }]).add, false);
+check("import: an exact name adds to that trip", i0.importDestBadge("kyoto", [{ name: "kyoto", masters: 31 }]).text, "Add to kyoto (31 clips)");
+check("import: case and spacing fold onto an existing trip", i0.importDestBadge("Ha Giang", [{ name: "ha-giang", masters: 31 }]).near, "ha-giang");
+check("import: underscore folds too", i0.importDestBadge("ha_giang", [{ name: "ha-giang", masters: 31 }]).near, "ha-giang");
+check("import: an empty name badges nothing", i0.importDestBadge("  ", []).text, "");
+check("import: default is the sole owner", i0.importDefaultName([{ start: 5, owners: ["mu"] }, { start: 9, owners: ["mu"] }]), "mu");
+check("import: else the last trip used", impApi("mu-cang-chai").importDefaultName([{ start: 5, owners: [] }]), "mu-cang-chai");
+check("import: else the capture date", i0.importDefaultName([{ start: 5, owners: [] }]), "day-5");
+check("import: two owners are not one destination", impApi("last").importDefaultName([{ start: 5, owners: ["a"] }, { start: 9, owners: ["b"] }]), "last");
+
 // Deleting a trip must say what it erases and from where, and make you type the
 // name when the cloud holds the only copy (#52). An archived trip has no local
 // clips, and its confirm used to read "0 clips" over all of its footage. The

@@ -423,12 +423,73 @@ function sessionStatus(s) {
 }
 
 function sessionAction(act, s) {
-  if (act === "import") return openImport(s);
+  if (act === "import") return openImport([s]);
   if (act === "clear")
     return openWipe({ window: [s.start, s.end], label: `the ${fmtRange(s.start, s.end)} session` });
   if (act === "cleartrash") return clearTrash(s);
   // "share" is handled in renderCard (it needs the row's action element for the
   // inline progress bar); nothing else reaches here.
+}
+
+// One session's row on the card panel. Folded and live rows are the same shape,
+// so the fold in renderCard can reuse it (#54).
+function sessionRow(s) {
+  const row = el("div", "session");
+  const c = sessionCounts(s);
+
+  // The contact strip: a few frames spread across the session's captures (videos
+  // and photos alike). Click it to watch the session before importing (read-only).
+  const strip = el("div", "strip");
+  for (const ref of s.strip) strip.append(frameImg(ref));
+  if (s.captures > s.strip.length)
+    strip.append(el("div", "more tnum", `+${s.captures - s.strip.length}`));
+  strip.append(elHTML("div", "strip-play", ICON_PLAY));
+  strip.setAttribute("role", "button");
+  strip.tabIndex = 0;
+  strip.title = "Preview this session";
+  strip.setAttribute("aria-label", `Preview the ${fmtRange(s.start, s.end)} session`);
+  const preview = () => openCardPreview([s.start, s.end], `Card · ${fmtRange(s.start, s.end)}`);
+  strip.onclick = preview;
+  strip.onkeydown = (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      preview();
+    }
+  };
+
+  const when = el("div", "when");
+  when.append(el("div", "range tnum", fmtRange(s.start, s.end)), el("div", "ago", ago(s.end)));
+
+  const st = sessionStatus(s);
+  const status = el("div", "status");
+  for (const ch of st.chips) status.append(chip(ch));
+
+  const actions = el("div", "actions");
+  // An owner uploading now → show its live bar in place of the Share button, so
+  // the push is visible here and can't be double-started. Survives a Rescan. An
+  // owner still queued → the muted "Queued to share…" placeholder.
+  const uploadingOwner = s.owners.find((o) => pushingTrips.has(o));
+  const queuedOwner = s.owners.find((o) => isQueued(o));
+  if (uploadingOwner) {
+    actions.append(shareProgressBox(uploadingOwner));
+  } else if (queuedOwner) {
+    actions.append(shareQueuedBox(queuedOwner));
+  } else {
+    const primary = st.act === "import" || st.act === "share";
+    const btn = el("button", `btn small ${primary ? "primary" : "ghost"}`, st.action);
+    btn.type = "button";
+    btn.onclick = st.act === "share" ? () => shareSession(s) : () => sessionAction(st.act, s);
+    actions.append(btn);
+  }
+
+  // Meta: how many videos, how many photos, and the total size.
+  const metaParts = [];
+  if (c.videos) metaParts.push(plural(c.videos, "clip"));
+  if (c.photos) metaParts.push(plural(c.photos, "photo"));
+  metaParts.push(fmtBytes(s.bytes));
+
+  row.append(strip, when, el("div", "s-meta tnum", metaParts.join("  ·  ")), status, actions);
+  return row;
 }
 
 // ---- render: inserted card ----
@@ -482,6 +543,14 @@ function renderCard(card) {
     if (disc) parts.push(`${disc} discarded`);
     if (newCount) safety.classList.add("has-new");
     safety.append(el("span", null, parts.join(" · ") || "Nothing to do here."));
+    // One dialog for every session with new captures, one name for all of
+    // them — the per-session rows still import one at a time (#54).
+    if (newCount) {
+      const all = el("button", "btn small primary", "Import all new →");
+      all.type = "button";
+      all.onclick = () => openImport(card.sessions.filter((s) => sessionCounts(s).newN > 0));
+      safety.append(all);
+    }
     // Escape hatch: clear imported footage off the card without a cloud check, for
     // when there's no internet. Deliberately subdued — the inCloud path is safer.
     if (stuck) {
@@ -495,63 +564,32 @@ function renderCard(card) {
   box.append(safety);
 
   const list = el("div", "sessions");
+  // Imported and safe-to-clear sessions are done: their rows are the same
+  // "Share →" / "Clear →" boilerplate several times over, and at four sessions
+  // the panel pushed the Trips heading (and any new card) off screen (#54).
+  // Fold them into one summary row; Show brings the rows back for their actions.
+  const done = [];
   for (const s of card.sessions) {
-    const row = el("div", "session");
     const c = sessionCounts(s);
-
-    // The contact strip: a few frames spread across the session's captures (videos
-    // and photos alike). Click it to watch the session before importing (read-only).
-    const strip = el("div", "strip");
-    for (const ref of s.strip) strip.append(frameImg(ref));
-    if (s.captures > s.strip.length)
-      strip.append(el("div", "more tnum", `+${s.captures - s.strip.length}`));
-    strip.append(elHTML("div", "strip-play", ICON_PLAY));
-    strip.setAttribute("role", "button");
-    strip.tabIndex = 0;
-    strip.title = "Preview this session";
-    strip.setAttribute("aria-label", `Preview the ${fmtRange(s.start, s.end)} session`);
-    const preview = () => openCardPreview([s.start, s.end], `Card · ${fmtRange(s.start, s.end)}`);
-    strip.onclick = preview;
-    strip.onkeydown = (e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        preview();
-      }
+    if (c.newN === 0 && (c.imp > 0 || s.safe)) done.push(s);
+    else list.append(sessionRow(s));
+  }
+  if (done.length) {
+    const safeN = done.filter((s) => s.safe).length;
+    const fold = el("div", "session session-fold");
+    const bits = [`${plural(done.length, "session")} done`];
+    if (safeN) bits.push(`${safeN} safe to clear`);
+    const toggle = el("button", "btn small ghost", "Show");
+    toggle.type = "button";
+    const detail = el("div", "fold-detail");
+    detail.hidden = true;
+    for (const s of done) detail.append(sessionRow(s));
+    toggle.onclick = () => {
+      detail.hidden = !detail.hidden;
+      toggle.textContent = detail.hidden ? "Show" : "Hide";
     };
-
-    const when = el("div", "when");
-    when.append(el("div", "range tnum", fmtRange(s.start, s.end)), el("div", "ago", ago(s.end)));
-
-    const st = sessionStatus(s);
-    const status = el("div", "status");
-    for (const ch of st.chips) status.append(chip(ch));
-
-    const actions = el("div", "actions");
-    // An owner uploading now → show its live bar in place of the Share button, so
-    // the push is visible here and can't be double-started. Survives a Rescan. An
-    // owner still queued → the muted "Queued to share…" placeholder.
-    const uploadingOwner = s.owners.find((o) => pushingTrips.has(o));
-    const queuedOwner = s.owners.find((o) => isQueued(o));
-    if (uploadingOwner) {
-      actions.append(shareProgressBox(uploadingOwner));
-    } else if (queuedOwner) {
-      actions.append(shareQueuedBox(queuedOwner));
-    } else {
-      const primary = st.act === "import" || st.act === "share";
-      const btn = el("button", `btn small ${primary ? "primary" : "ghost"}`, st.action);
-      btn.type = "button";
-      btn.onclick = st.act === "share" ? () => shareSession(s) : () => sessionAction(st.act, s);
-      actions.append(btn);
-    }
-
-    // Meta: how many videos, how many photos, and the total size.
-    const metaParts = [];
-    if (c.videos) metaParts.push(plural(c.videos, "clip"));
-    if (c.photos) metaParts.push(plural(c.photos, "photo"));
-    metaParts.push(fmtBytes(s.bytes));
-
-    row.append(strip, when, el("div", "s-meta tnum", metaParts.join("  ·  ")), status, actions);
-    list.append(row);
+    fold.append(el("div", "fold-sum", bits.join(" · ")), toggle);
+    list.append(fold, detail);
   }
   box.append(list);
   panel.append(box);
@@ -1136,8 +1174,11 @@ const impBar = $("#imp-bar");
 const impGo = $("#import-go");
 const impCancel = $("#import-cancel");
 
-let impSession = null;
+let impSessions = [];
 let importing = false;
+// Where the last import landed. The next dialog defaults to it, so a card of
+// several sessions becomes one trip instead of one trip per capture date (#54).
+let lastImportTrip = null;
 
 // Recolour the dialog to the destination trip: drives the input focus ring and
 // the progress bar, and lights the matching quick-pick.
@@ -1152,23 +1193,67 @@ function setBar(frac) {
   impBar.style.transform = `scaleX(${Math.max(0, Math.min(1, frac))})`;
 }
 
-function openImport(s) {
+// Names fold for the near-match check: "Ha-Giang" and "ha giang" beside an
+// existing "ha-giang" would each silently make a second trip (#54).
+function foldTripName(s) {
+  return s.toLowerCase().replace(/[\s_]+/g, "-");
+}
+// What the typed destination means: add to an existing trip (with its size), a
+// brand-new trip, or a new trip one fold away from an existing name — said out
+// loud before Import, not after the split.
+function importDestBadge(name, trips) {
+  const n = (name || "").trim();
+  if (!n) return { text: "", near: null, add: false };
+  const exact = trips.find((t) => t.name === n);
+  if (exact) return { text: `Add to ${exact.name} (${plural(exact.masters, "clip")})`, near: null, add: true };
+  const near = trips.find((t) => foldTripName(t.name) === foldTripName(n));
+  if (near) return { text: `New trip — ${near.name} already exists with that spelling folded`, near: near.name, add: false };
+  return { text: "New trip", near: null, add: false };
+}
+// Destination default: a session already spoken for lands where its clips went,
+// then the last trip you imported into (a three-day card must not become three
+// trips), else the capture date (#54).
+function importDefaultName(sessions) {
+  const owners = [...new Set(sessions.flatMap((s) => s.owners || []))];
+  if (owners.length === 1) return owners[0];
+  return lastImportTrip || isoDay(sessions[0].start);
+}
+function paintImportBadge() {
+  const badge = $("#import-badge");
+  const b = importDestBadge(impName.value, lastTrips);
+  badge.textContent = b.text;
+  badge.classList.toggle("near", !!b.near);
+  badge.hidden = !b.text;
+}
+
+// `sessions` is one session row's worth, or every session with new captures —
+// "Import all new" — and they all land in the one named trip (#54).
+function openImport(sessions) {
   // A copy is already running — the dialog is mid-import and resetting the form
   // here would re-enable Import and let a second `import_session` start against the
   // same ledger snapshot, landing the same card clips in two trips (the exact
   // failure this app was built to end). Leave the running import alone.
   if (importing) return;
-  impSession = s;
-  const c = sessionCounts(s);
+  impSessions = sessions;
   // What will actually copy in: the new captures (or everything, if none imported
   // yet). Photos and videos are one unit and counted together.
-  const freshLabel = plural(c.newN || c.total, "clip");
-  impMeta.textContent = `${fmtRange(s.start, s.end)} · ${freshLabel} · ${fmtBytes(s.bytes)}`;
-  const alreadyImp = c.imp;
+  const fresh = sessions.reduce((a, s) => {
+    const c = sessionCounts(s);
+    return a + (c.newN || c.total);
+  }, 0);
+  const bytes = sessions.reduce((a, s) => a + s.bytes, 0);
+  const span =
+    sessions.length > 1
+      ? plural(sessions.length, "session")
+      : fmtRange(sessions[0].start, sessions[0].end);
+  impMeta.textContent = `${span} · ${plural(fresh, "clip")} · ${fmtBytes(bytes)}`;
+  const alreadyImp = sessions.reduce((a, s) => a + sessionCounts(s).imp, 0);
   impHint.textContent =
     alreadyImp > 0
-      ? `${alreadyImp} already imported — only the new ${plural(c.newN, "clip")} copy in.`
-      : "A new name creates a trip; pick one below to add to it.";
+      ? `${alreadyImp} already imported — only the new ${plural(fresh, "clip")} copy in.`
+      : sessions.length > 1
+        ? "A new name creates one trip for all of them; pick one below to add to it."
+        : "A new name creates a trip; pick one below to add to it.";
 
   // existing trips as quick picks, each dotted in its own colour
   impPicks.innerHTML = "";
@@ -1181,21 +1266,22 @@ function openImport(s) {
     b.onclick = () => {
       impName.value = t.name;
       paintTc(t.name);
+      paintImportBadge();
     };
     impPicks.append(b);
   }
   impPicks.hidden = lastTrips.length === 0;
 
-  // default: the sole owning trip if there is one, else the capture date
-  impName.value = s.owners && s.owners.length === 1 ? s.owners[0] : isoDay(s.start);
+  impName.value = importDefaultName(sessions);
 
   impErr.hidden = true;
   impProg.hidden = true;
   setBar(0);
   impName.disabled = false;
   impGo.disabled = false;
-  impGo.textContent = "Import";
+  impGo.textContent = sessions.length > 1 ? `Import ${plural(sessions.length, "session")}` : "Import";
   paintTc(impName.value);
+  paintImportBadge();
 
   dlg.showModal();
   impName.focus();
@@ -1260,33 +1346,50 @@ async function runImport() {
   if (channel) channel.onmessage = onImportProgress;
 
   try {
-    const res = await invoke("import_session", {
-      channel,
-      trip: name,
-      start: impSession.start,
-      end: impSession.end,
-    });
+    // One name, every session in the batch (#54): the copy runs session by
+    // session into the same trip, and the result is summed for one summary.
+    const sum = { trip: name, copied: 0, bytes: 0, skippedHere: 0, skippedOther: 0, photos: 0 };
+    for (let i = 0; i < impSessions.length; i++) {
+      const s = impSessions[i];
+      if (impSessions.length > 1) impGo.textContent = `Importing ${i + 1} / ${impSessions.length}…`;
+      const res = await invoke("import_session", {
+        channel,
+        trip: name,
+        start: s.start,
+        end: s.end,
+      });
+      sum.copied += res.copied;
+      sum.bytes += res.bytes;
+      sum.photos += res.photos;
+      sum.skippedHere += res.skippedHere;
+      sum.skippedOther += res.skippedOther;
+    }
     importing = false;
+    lastImportTrip = name;
     impCancel.disabled = false;
     dlg.close();
-    toast(importSummary(res), {
+    toast(importSummary(sum), {
       action: {
-        label: `Review ${res.trip} →`,
+        label: `Review ${sum.trip} →`,
         run: () => {
-          const t = lastTrips.find((x) => x.name === res.trip);
+          const t = lastTrips.find((x) => x.name === sum.trip);
           if (t) openReview(t);
-          else toast(`${res.trip} isn't on the dashboard yet — rescan and try again.`, { kind: "error" });
+          else toast(`${sum.trip} isn't on the dashboard yet — rescan and try again.`, { kind: "error" });
         },
       },
     });
     await load();
+    landOnTrip(sum.trip); // the grid sorts by name — go to what just happened
   } catch (e) {
     importing = false;
     failImport(String(e));
   }
 }
 
-impName.addEventListener("input", () => paintTc(impName.value.trim()));
+impName.addEventListener("input", () => {
+  paintTc(impName.value.trim());
+  paintImportBadge();
+});
 impName.addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
     e.preventDefault();
@@ -1650,6 +1753,41 @@ $("#refresh").addEventListener("click", () => {
     b.disabled = false;
     b.innerHTML = '<span class="btn-ico" aria-hidden="true">↻</span> Rescan';
   });
+});
+
+// Land on what just happened (#54): the trips grid sorts by name, so a new or
+// updated card can sit well below the fold. Scroll it in and pulse it in the
+// trip's colour — the toast alone led nowhere.
+function landOnTrip(name) {
+  const card = [...document.querySelectorAll(".trip[data-trip]")].find((c) => c.dataset.trip === name);
+  if (!card) return;
+  card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  card.classList.remove("pulse");
+  requestAnimationFrame(() => card.classList.add("pulse"));
+  card.addEventListener("animationend", () => card.classList.remove("pulse"), { once: true });
+}
+
+// The card is noticed when you come back to the window (#54): plug it in on
+// another desk, alt-tab back, and the panel updates — and "Card inserted" goes
+// away when you pull it. Card only; a full load() would re-sort the dashboard
+// under you. Debounced so a focus/visibility pair fires once.
+let cardScanT = null;
+function scheduleCardScan() {
+  if (cardScanT) clearTimeout(cardScanT);
+  cardScanT = setTimeout(() => {
+    cardScanT = null;
+    if (importing) return; // the running copy owns the card right now
+    invoke("scan_card")
+      .then((card) => {
+        lastCard = card;
+        renderCard(card);
+      })
+      .catch(() => {});
+  }, 500);
+}
+window.addEventListener("focus", scheduleCardScan);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) scheduleCardScan();
 });
 
 // ============================ review / player ============================

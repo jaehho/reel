@@ -301,6 +301,15 @@ main {
   padding: 13px 22px;
   border-top: 1px solid var(--line-soft);
 }
+/* The one row every finished session folds into (#54) */
+.session-fold {
+  justify-content: space-between;
+}
+.fold-sum {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 600;
+}
 .strip {
   display: flex;
   gap: 4px;
@@ -544,6 +553,20 @@ main {
   transform: translateY(-2px);
   box-shadow: var(--shadow), 0 0 0 1px var(--tc),
     0 16px 38px color-mix(in oklab, var(--tc) 32%, transparent);
+}
+/* "land here" pulse after an import — the card scrolled to just now (#54) */
+.trip.pulse {
+  animation: trip-pulse 1.1s var(--ease) 2;
+}
+@keyframes trip-pulse {
+  0%,
+  100% {
+    box-shadow: var(--shadow);
+  }
+  40% {
+    box-shadow: var(--shadow), 0 0 0 3px var(--tc),
+      0 12px 32px color-mix(in oklab, var(--tc) 45%, transparent);
+  }
 }
 /* loading placeholders while the scan runs */
 .trip.skeleton {
@@ -1032,6 +1055,17 @@ main {
   color: var(--faint);
   font-size: 12px;
   line-height: 1.4;
+}
+/* Live read on the typed destination: "Add to ha-giang (31 clips)" vs "New
+   trip", amber when the name folds onto an existing one (#54). */
+.field-badge {
+  margin-top: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--safe);
+}
+.field-badge.near {
+  color: var(--warn);
 }
 .trip-picks {
   display: flex;
