@@ -65,6 +65,8 @@ pub fn push_trip(
 
     // ---- upload (resumable: rclone skips files already in the cloud) ----
     let mut uploaded = 0u64;
+    let mut landed = 0usize; // files rclone reports done — what a stop keeps
+    let mut planned = 0usize; // totalTransfers: the leg's full set on success
     let copied = rclone::stream(
         cloud_args(
             &[
@@ -85,6 +87,8 @@ pub fn push_trip(
             let s = &v["stats"];
             let done = s["bytes"].as_u64().unwrap_or(0);
             uploaded = uploaded.max(done);
+            landed = s["transfers"].as_u64().unwrap_or(0) as usize;
+            planned = s["totalTransfers"].as_u64().unwrap_or(0) as usize;
             let file = s["transferring"]
                 .as_array()
                 .and_then(|a| a.first())
@@ -103,6 +107,19 @@ pub fn push_trip(
         },
     )?;
     if !copied {
+        // A deliberate stop (#56): the files that landed are safe and resumable.
+        // Nothing is marked shared and the baseline is untouched — the next
+        // Share picks up where this left off. `files` counts what landed, so
+        // the caller can say "stopped after 14 of 31".
+        if crate::cancel::stopped() {
+            return Ok(PushResult {
+                trip: trip.to_string(),
+                files: landed,
+                bytes: 0,
+                uploaded,
+                stopped: true,
+            });
+        }
         return Err(
             "upload didn't finish — your local copies are safe; Share again to resume".into(),
         );
@@ -173,8 +190,18 @@ pub fn push_trip(
         .sum();
     Ok(PushResult {
         trip: trip.to_string(),
-        files: mine.len(),
+        // What this run did: the files rclone moved, so a sweep can total the
+        // transfers against its plan. rclone exiting zero means every planned
+        // transfer finished, and `totalTransfers` is that count. When nothing
+        // was uploaded everything was already up — the count the "already
+        // shared" line wants is then every master the check just re-verified.
+        files: if uploaded == 0 {
+            mine.len()
+        } else {
+            landed.max(planned)
+        },
         bytes,
         uploaded,
+        stopped: false,
     })
 }

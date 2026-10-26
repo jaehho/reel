@@ -18,7 +18,8 @@
 use crate::config::Config;
 use crate::media::{has_ext, masters_in, CAPTURE_EXT};
 use crate::model::{
-    SyncActions, SyncBrief, SyncItem, SyncPhase, SyncProgress, SyncResult, TripSync,
+    SyncActions, SyncBrief, SyncItem, SyncPhase, SyncPlan, SyncPlanTrip, SyncProgress, SyncResult,
+    TripSync,
 };
 use crate::rclone;
 use crate::store::{load_cloud_cache, now_epoch, save_cloud_cache, FileSet, Pending, PendingOp};
@@ -606,7 +607,14 @@ pub fn reconcile(
     }
 
     let still_pending = Pending::load(&cfg.pending_path()).count_for(trip);
-    let final_status = sync_status(cfg, trip, true)?;
+    // A stopped run (#56) doesn't spend another cloud fetch to certify what it
+    // didn't do: report the stop, and leave in_sync false.
+    let stopped = crate::cancel::stopped();
+    let in_sync = if stopped {
+        false
+    } else {
+        sync_status(cfg, trip, true)?.in_sync
+    };
     Ok(SyncResult {
         trip: trip.to_string(),
         pushed,
@@ -615,7 +623,8 @@ pub fn reconcile(
         deleted,
         replayed,
         still_pending,
-        in_sync: final_status.in_sync,
+        in_sync,
+        stopped,
         // A single-trip reconcile propagates its failure with `?` rather than
         // collecting it, so there is never a partial success to report here.
         failed: Vec::new(),
@@ -631,6 +640,7 @@ pub fn reconcile(
 /// trip you deleted offline, whose local dir is gone so no per-trip reconcile would
 /// reach it.
 pub fn reconcile_all(cfg: &Config, mut on: impl FnMut(SyncProgress)) -> Result<SyncResult, String> {
+    crate::cancel::reset_stop(); // the sweep is one user action (#56)
     rclone::remote_ok(&cfg.remote)?;
 
     // 1) flush the whole owed-op queue (covers orphaned purges).
@@ -639,6 +649,9 @@ pub fn reconcile_all(cfg: &Config, mut on: impl FnMut(SyncProgress)) -> Result<S
     let total = pending.rows.len() as u64;
     let mut applied: Vec<PendingOp> = Vec::new();
     for (_, op) in pending.rows.iter() {
+        if crate::cancel::stopped() {
+            break;
+        }
         on(SyncProgress {
             phase: SyncPhase::Replay,
             file: op.trip().to_string(),
@@ -675,6 +688,11 @@ pub fn reconcile_all(cfg: &Config, mut on: impl FnMut(SyncProgress)) -> Result<S
     let dirs = trip_dirs(cfg);
     let trip_count = dirs.len() as u32;
     for (i, dir) in dirs.iter().enumerate() {
+        // Stop lands between trips — and within a trip, between files (see
+        // rclone::stream). Whatever ran is persisted; the rest is not started.
+        if crate::cancel::stopped() {
+            break;
+        }
         let Some(name) = dir.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
@@ -706,6 +724,7 @@ pub fn reconcile_all(cfg: &Config, mut on: impl FnMut(SyncProgress)) -> Result<S
     }
 
     let still_pending = Pending::load(&cfg.pending_path()).rows.len();
+    let stopped = crate::cancel::stopped();
     Ok(SyncResult {
         trip: String::new(),
         pushed,
@@ -714,7 +733,57 @@ pub fn reconcile_all(cfg: &Config, mut on: impl FnMut(SyncProgress)) -> Result<S
         deleted: 0,
         replayed,
         still_pending,
-        in_sync: pushed == 0 && pulled == 0 && still_pending == 0 && failed.is_empty(),
+        in_sync: !stopped && pushed == 0 && pulled == 0 && still_pending == 0 && failed.is_empty(),
+        stopped,
         failed,
     })
+}
+
+/// What `reconcile_all` would move, checked first and transferred never (#56).
+/// One fresh cloud fetch per trip — the same check the sweep runs — streamed as
+/// `Check` progress so the plan dialog can show where it is. The Go button then
+/// runs the sweep, which re-checks and transfers what is still owed.
+pub fn plan_all(cfg: &Config, mut on: impl FnMut(SyncProgress)) -> Result<SyncPlan, String> {
+    rclone::remote_ok(&cfg.remote)?;
+    let mut plan = SyncPlan {
+        replay: Pending::load(&cfg.pending_path()).rows.len(),
+        ..Default::default()
+    };
+    let dirs = trip_dirs(cfg);
+    let trip_count = dirs.len() as u32;
+    for (i, dir) in dirs.iter().enumerate() {
+        if crate::cancel::stopped() {
+            break;
+        }
+        let Some(name) = dir.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        on(SyncProgress {
+            phase: SyncPhase::Check,
+            trip: name.to_string(),
+            trip_index: i as u32 + 1,
+            trip_count,
+            ..Default::default()
+        });
+        match sync_status(cfg, name, true) {
+            Ok(s) => {
+                if s.offline {
+                    plan.offline.push(name.to_string());
+                }
+                let push_clips = s.to_push.len();
+                let pull_clips = s.to_pull.len();
+                if push_clips > 0 || pull_clips > 0 {
+                    plan.trips.push(SyncPlanTrip {
+                        trip: name.to_string(),
+                        push_clips,
+                        push_bytes: s.to_push.iter().map(|it| it.bytes).sum(),
+                        pull_clips,
+                        pull_bytes: s.to_pull.iter().map(|it| it.bytes).sum(),
+                    });
+                }
+            }
+            Err(_) => plan.offline.push(name.to_string()),
+        }
+    }
+    Ok(plan)
 }

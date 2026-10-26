@@ -848,6 +848,9 @@ function tripCard(t) {
 
 // ---- share: push a trip's footage to the cloud, with progress inline on the card ----
 function shareSummary(r) {
+  // A Stop landed between files (#56) — what landed is resumable, nothing was
+  // verified, so never say "shared".
+  if (r.stopped) return `Stopped — ${plural(r.files, "clip")} uploaded before it; Share again to finish`;
   if (r.uploaded > 0)
     return `Shared ${plural(r.files, "clip")} · ${fmtBytes(r.uploaded)} up to the cloud`;
   return `${r.trip} already shared — ${plural(r.files, "clip")} verified in the cloud`;
@@ -967,12 +970,16 @@ function dequeueShare(name) {
 async function drainShareQueue() {
   if (shareDraining) return;
   shareDraining = true;
+  // A fresh drain is its own user action (#56): clear any stop a previous job
+  // left armed. A Stop during the drain winds it down between trips.
+  invoke("job_reset").catch(() => {});
   try {
     while (shareQueue.length) {
       const name = shareQueue.shift();
       const t = lastTrips.find((x) => x.name === name);
       if (!t) continue; // renamed/deleted before its turn — skip
-      await pushTrip(t);
+      const res = await pushTrip(t);
+      if (res && res.stopped) break; // the stop token (#56) — leave the queue
     }
   } finally {
     shareDraining = false;
@@ -995,9 +1002,10 @@ async function pushTrip(t) {
   reflow(); // swap this trip's Share/Queued box for its live bar now
   paintShareProgress(t.name);
 
+  let out = null;
   try {
-    const res = await invoke("share_trip", { channel, trip: t.name });
-    toast(shareSummary(res));
+    out = await invoke("share_trip", { channel, trip: t.name });
+    toast(shareSummary(out));
   } catch (e) {
     toast(String(e), { kind: "error" });
   } finally {
@@ -1011,6 +1019,7 @@ async function pushTrip(t) {
       .then((s) => updateShareChip(t, s.length))
       .catch(() => {});
   }
+  return out;
 }
 
 // A trip card's Share button: queue this one trip. A second click while it's
@@ -1076,6 +1085,11 @@ function renderShareAll() {
 
 // ---- cut: write a trip's marked ranges into clips/, progress inline on the card ----
 function cutSummary(r) {
+  // A Stop landed between marks (#56): say how far it got, never just "Cut N".
+  if (r.stopped) {
+    const done = r.made + r.skipped + r.kept + r.failed;
+    return `Stopped after ${done} of ${r.count} — ${plural(r.made, "clip")} written`;
+  }
   const bits = [`Cut ${plural(r.made, "clip")}`];
   if (r.skipped) bits.push(`${r.skipped} up to date`);
   if (r.kept) bits.push(`${plural(r.kept, "clip")} left alone, not as Cut made them`);
@@ -5378,27 +5392,140 @@ function markFailedSyncRows(failed) {
   }
 }
 
-$("#sync-all").addEventListener("click", async () => {
+$("#sync-all").addEventListener("click", () => openSyncAll());
+
+// Topbar Sync is the full reconcile — but nothing moves until the plan it just
+// computed says Go (#56). One generation per dialog open, so a Cancel can drop
+// the in-flight plan or run instead of writing into a closed panel.
+let syncAllGen = 0;
+// What the Go button would run — the denominator for "stopped after N of M".
+let syncAllPlan = null;
+const setProgBar = (node, f) => (node.style.transform = `scaleX(${Math.max(0, Math.min(1, f))})`);
+
+// "Upload 40 clips (62 GiB) from 3 trips · Download 6 clips (12 GiB) into
+// iceland" — what a sweep would move, in the panel's own words (#56).
+function syncPlanSummary(plan) {
+  const up = { n: 0, b: 0, trips: 0 };
+  const down = { n: 0, b: 0, trips: [] };
+  for (const t of plan.trips) {
+    if (t.pushClips) {
+      up.n += t.pushClips;
+      up.b += t.pushBytes;
+      up.trips++;
+    }
+    if (t.pullClips) {
+      down.n += t.pullClips;
+      down.b += t.pullBytes;
+      down.trips.push(t.trip);
+    }
+  }
+  const bits = [];
+  if (plan.replay) bits.push(`Apply ${plural(plan.replay, "owed op")} first`);
+  if (up.n) bits.push(`Upload ${plural(up.n, "clip")} (${fmtBytes(up.b)}) from ${plural(up.trips, "trip")}`);
+  if (down.n) {
+    const where = down.trips.length > 1 ? `${down.trips.length} trips` : down.trips[0];
+    bits.push(`Download ${plural(down.n, "clip")} (${fmtBytes(down.b)}) into ${where}`);
+  }
+  if (plan.offline.length) bits.push(`couldn't check ${plural(plan.offline.length, "trip")}`);
+  return bits.join(" · ") || "Everything is already in sync — nothing to move.";
+}
+function syncPlanTotal(plan) {
+  return plan.trips.reduce((a, t) => a + t.pushClips + t.pullClips, 0);
+}
+
+async function openSyncAll() {
   const b = $("#sync-all");
   if (b.disabled) return;
   b.disabled = true;
-
-  // reset the panel to a clean "starting" state
+  const gen = ++syncAllGen;
+  syncAllPlan = null;
+  // reset the panel to a clean "planning" state
+  $("#syncall-title").textContent = "Sync every trip";
   $("#syncall-log").replaceChildren();
+  $("#syncall-plan").hidden = true;
+  $("#syncall-plan-list").replaceChildren();
   $("#syncall-error").hidden = true;
   $("#syncall-meta").textContent = "Checking the cloud…";
-  $("#syncall-overall").textContent = "Preparing…";
+  $("#syncall-overall").textContent = "Checking…";
   $("#syncall-count").textContent = "";
   $("#syncall-stage").textContent = "";
   $("#syncall-pct").textContent = "";
-  const obar = $("#syncall-obar");
-  const fill = $("#syncall-fill");
-  const setBar = (node, f) => (node.style.transform = `scaleX(${Math.max(0, Math.min(1, f))})`);
-  setBar(obar, 0);
-  setBar(fill, 0);
-  const closeBtn = $("#syncall-close");
-  closeBtn.disabled = true;
+  setProgBar($("#syncall-obar"), 0);
+  setProgBar($("#syncall-fill"), 0);
+  $("#syncall-prog").hidden = false;
+  $("#syncall-go").hidden = true;
+  $("#syncall-stop").hidden = true;
+  $("#syncall-close").hidden = true;
+  $("#syncall-cancel").hidden = false;
   syncAllDlg.showModal();
+
+  const Ch = window.__TAURI__?.core?.Channel;
+  const channel = Ch ? new Ch() : null;
+  if (channel)
+    channel.onmessage = (p) => {
+      if (gen !== syncAllGen || !p.tripCount) return;
+      $("#syncall-overall").textContent = `Checking trip ${p.tripIndex} of ${p.tripCount}`;
+      $("#syncall-count").textContent = `${p.tripIndex}/${p.tripCount}`;
+      setProgBar($("#syncall-obar"), (p.tripIndex - 1) / p.tripCount);
+      $("#syncall-meta").textContent = p.trip;
+    };
+  let plan;
+  try {
+    plan = await invoke("sync_plan", { channel });
+  } catch (e) {
+    if (gen !== syncAllGen) return;
+    $("#syncall-error").textContent = String(e);
+    $("#syncall-error").hidden = false;
+    $("#syncall-overall").textContent = "Couldn't check the cloud";
+    $("#syncall-close").hidden = false;
+    $("#syncall-cancel").hidden = true;
+    return;
+  }
+  if (gen !== syncAllGen) return;
+  syncAllPlan = plan;
+  showSyncPlan(plan, gen);
+}
+
+// The plan on screen: one row per trip with work, the summary line, and Go.
+function showSyncPlan(plan, gen) {
+  $("#syncall-prog").hidden = true;
+  const list = $("#syncall-plan-list");
+  list.replaceChildren();
+  for (const t of plan.trips) {
+    const li = el("li", "plan-row");
+    const bits = [];
+    if (t.pushClips) bits.push(`↑ ${plural(t.pushClips, "clip")} (${fmtBytes(t.pushBytes)})`);
+    if (t.pullClips) bits.push(`↓ ${plural(t.pullClips, "clip")} (${fmtBytes(t.pullBytes)})`);
+    li.append(el("span", "log-name", t.trip), el("span", "log-note tnum", bits.join("  ·  ")));
+    list.append(li);
+  }
+  for (const name of plan.offline) {
+    const li = el("li", "plan-row offline");
+    li.append(el("span", "log-name", name), el("span", "log-note", "couldn't reach the cloud"));
+    list.append(li);
+  }
+  $("#syncall-plan").hidden = false;
+  $("#syncall-meta").textContent = syncPlanSummary(plan);
+  const total = syncPlanTotal(plan);
+  $("#syncall-go").hidden = false;
+  $("#syncall-go").disabled = total === 0 && plan.replay === 0;
+  $("#syncall-go").onclick = () => runSyncAll(plan, gen);
+  $("#syncall-cancel").hidden = false;
+  $("#syncall-cancel").disabled = false;
+}
+
+async function runSyncAll(plan, gen) {
+  const planTotal = syncPlanTotal(plan);
+  $("#syncall-title").textContent = "Syncing every trip";
+  $("#syncall-plan").hidden = true;
+  $("#syncall-prog").hidden = false;
+  $("#syncall-go").hidden = true;
+  $("#syncall-cancel").hidden = true;
+  $("#syncall-stop").hidden = false;
+  $("#syncall-close").hidden = true;
+  $("#syncall-log").replaceChildren();
+  $("#syncall-meta").textContent = "Starting…";
+  $("#syncall-overall").textContent = "Preparing…";
 
   let curTrip = null;
   let curRow = null;
@@ -5409,12 +5536,13 @@ $("#sync-all").addEventListener("click", async () => {
   const channel = Ch ? new Ch() : null;
   if (channel)
     channel.onmessage = (p) => {
+      if (gen !== syncAllGen) return;
       const label = SYNC_PHASE[p.phase] || p.phase;
       if (p.tripCount > 0) {
         // the per-trip sweep — advance the overall counter and the trip log
         $("#syncall-overall").textContent = `Trip ${p.tripIndex} of ${p.tripCount}`;
         $("#syncall-count").textContent = `${p.tripIndex}/${p.tripCount}`;
-        setBar(obar, (p.tripIndex - 1 + inner(p)) / p.tripCount);
+        setProgBar($("#syncall-obar"), (p.tripIndex - 1 + inner(p)) / p.tripCount);
         if (p.trip && p.trip !== curTrip) {
           finishSyncRow(curRow);
           curTrip = p.trip;
@@ -5433,45 +5561,77 @@ $("#sync-all").addEventListener("click", async () => {
         // the pre-sweep owed-op flush (no per-trip counter yet)
         $("#syncall-overall").textContent = "Applying owed ops…";
         $("#syncall-count").textContent = p.total ? `${p.done}/${p.total}` : "";
-        setBar(obar, p.total ? p.done / p.total : 0.05);
+        setProgBar($("#syncall-obar"), p.total ? p.done / p.total : 0.05);
         $("#syncall-meta").textContent = p.file ? `Owed op on ${p.file}` : "Applying owed ops…";
       }
       $("#syncall-stage").textContent = p.file ? `${label} ${p.file}` : label;
       $("#syncall-pct").textContent = p.total ? `${Math.round((p.done / p.total) * 100)}%` : "";
-      setBar(fill, inner(p));
+      setProgBar($("#syncall-fill"), inner(p));
     };
 
   try {
     const r = await invoke("sync_all", { channel });
+    if (gen !== syncAllGen) return;
     finishSyncRow(curRow);
     markFailedSyncRows(r.failed);
-    setBar(obar, 1);
-    setBar(fill, 1);
-    const anyFailed = (r.failed || []).length > 0;
-    $("#syncall-overall").textContent = anyFailed ? "Done — some trips failed" : "Done";
     $("#syncall-stage").textContent = "";
     $("#syncall-pct").textContent = "";
-    $("#syncall-meta").textContent = syncSummary(r);
+    if (r.stopped) {
+      // A Stop landed between files (#56): say how far it got against the plan
+      // it was running, never "done".
+      const done = r.pushed + r.pulled;
+      $("#syncall-overall").textContent = "Stopped";
+      $("#syncall-meta").textContent = planTotal
+        ? `Stopped after ${done} of ${planTotal}`
+        : `Stopped — ${plural(done, "clip")} moved`;
+    } else {
+      setProgBar($("#syncall-obar"), 1);
+      setProgBar($("#syncall-fill"), 1);
+      const anyFailed = (r.failed || []).length > 0;
+      $("#syncall-overall").textContent = anyFailed ? "Done — some trips failed" : "Done";
+      $("#syncall-meta").textContent = syncSummary(r);
+    }
     await load(); // cards' chips reflect the new state
   } catch (e) {
+    if (gen !== syncAllGen) return;
     $("#syncall-error").textContent = String(e);
     $("#syncall-error").hidden = false;
     $("#syncall-overall").textContent = "Sync failed";
     $("#syncall-meta").textContent = "Couldn't reach the cloud.";
   } finally {
-    closeBtn.disabled = false;
-    b.disabled = false;
+    if (gen === syncAllGen) {
+      $("#syncall-stop").hidden = true;
+      $("#syncall-close").hidden = false;
+    }
   }
-});
+}
 
 $("#syncall-close").addEventListener("click", () => syncAllDlg.close());
-// backdrop dismiss only once the run has finished (Close enabled)
-syncAllDlg.addEventListener("click", (e) => {
-  if (e.target === syncAllDlg && !$("#syncall-close").disabled) syncAllDlg.close();
+$("#syncall-cancel").addEventListener("click", () => {
+  syncAllGen++; // drop the in-flight plan/run continuation
+  invoke("job_stop").catch(() => {});
+  syncAllDlg.close();
+  $("#sync-all").disabled = false;
 });
-// block Escape while a sweep is still running
+$("#syncall-stop").addEventListener("click", () => {
+  // The shared stop token (#56): the job in flight notices at its next file
+  // boundary and unwinds with a "Stopped after N of M" tally.
+  invoke("job_stop").catch((e) => toast(String(e), { kind: "error" }));
+  $("#syncall-stop").disabled = true;
+  $("#syncall-stop").textContent = "Stopping…";
+});
+// backdrop dismiss only once the panel is idle (Close showing)
+syncAllDlg.addEventListener("click", (e) => {
+  if (e.target === syncAllDlg && !$("#syncall-close").hidden) syncAllDlg.close();
+});
+// block Escape while a plan or sweep is still in flight
 syncAllDlg.addEventListener("cancel", (e) => {
-  if ($("#syncall-close").disabled) e.preventDefault();
+  if ($("#syncall-close").hidden) e.preventDefault();
+});
+syncAllDlg.addEventListener("close", () => {
+  $("#sync-all").disabled = false;
+  $("#syncall-stop").disabled = false;
+  $("#syncall-stop").textContent = "Stop";
 });
 
 setPlayIcon(false);

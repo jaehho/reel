@@ -265,6 +265,7 @@ pub fn cut_trip(
     if marks.is_empty() {
         return Err(format!("no marks to cut in '{trip}' — review it first"));
     }
+    crate::cancel::reset_stop(); // a cut is its own user action (#56)
     let clips = dir.join("clips");
     std::fs::create_dir_all(&clips).map_err(|e| format!("couldn't make clips/: {e}"))?;
 
@@ -292,6 +293,21 @@ pub fn cut_trip(
         .cloned()
         .collect();
     for (i, (m, p)) in marks.iter().zip(&plan).enumerate() {
+        // Stop lands between files (#56): each clip already written stays, and
+        // the result says how far the run got.
+        if crate::cancel::stopped() {
+            return Ok(CutResult {
+                trip: trip.to_string(),
+                made,
+                skipped,
+                kept,
+                removed: 0,
+                failed,
+                count,
+                stopped: true,
+                dir: clips.display().to_string(),
+            });
+        }
         let n = i + 1;
         let Some(Planned { master, row }) = p else {
             failed += 1;
@@ -442,6 +458,8 @@ pub fn cut_trip(
         kept,
         removed: gone.len(),
         failed,
+        count,
+        stopped: false,
         dir: clips.display().to_string(),
     })
 }

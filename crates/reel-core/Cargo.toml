@@ -11,6 +11,8 @@ serde_json = { workspace = true }
 sha1 = "0.10"
 hex = "0.4"
 walkdir = "2"
+# SIGINT a running rclone so Stop lands between files, not mid-transfer.
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

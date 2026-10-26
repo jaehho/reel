@@ -244,13 +244,17 @@
       </form>
     </dialog>
 
-    <!-- Global Sync progress: sweeping every trip through the cloud, one at a time,
-         with an overall counter, the trip in flight, and a per-trip log. -->
+    <!-- Global Sync: a plan first (what a sweep would move), then the sweep —
+         with an overall counter, the trip in flight, a per-trip log, and a Stop
+         that lands between files. -->
     <dialog id="syncall-dialog" class="dialog" aria-labelledby="syncall-title">
       <form method="dialog" class="import-form">
         <div class="dialog-head">
-          <h2 class="dialog-title" id="syncall-title">Syncing every trip</h2>
+          <h2 class="dialog-title" id="syncall-title">Sync every trip</h2>
           <p class="dialog-meta" id="syncall-meta">Checking the cloud…</p>
+        </div>
+        <div class="sync-plan" id="syncall-plan" hidden>
+          <ul class="plan-list" id="syncall-plan-list"></ul>
         </div>
         <div class="sync-prog" id="syncall-prog">
           <div class="sync-prog-row">
@@ -266,7 +270,10 @@
         <ul class="sync-log" id="syncall-log"></ul>
         <p class="dialog-error" id="syncall-error" role="alert" hidden></p>
         <div class="dialog-foot">
-          <button class="btn primary" type="button" id="syncall-close" disabled>Close</button>
+          <button class="btn ghost" type="button" id="syncall-stop" hidden>Stop</button>
+          <button class="btn ghost" type="button" id="syncall-cancel">Cancel</button>
+          <button class="btn primary" type="button" id="syncall-go" hidden>Go</button>
+          <button class="btn primary" type="button" id="syncall-close" hidden>Close</button>
         </div>
       </form>
     </dialog>

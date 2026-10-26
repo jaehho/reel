@@ -249,12 +249,41 @@ pub struct SyncResult {
     /// Owed ops still queued (remote still couldn't take them).
     pub still_pending: usize,
     pub in_sync: bool,
+    /// The run stopped at a file/trip boundary on request (#56): what landed is
+    /// persisted, the rest was not started.
+    pub stopped: bool,
     /// Trips the sweep couldn't finish, with why. A whole-library sync keeps going
     /// past a failing trip on purpose, but it must still say which ones failed:
     /// reporting a half-finished 39 GiB upload as "✓ updated" is the one thing this
     /// app can't do. Empty on a per-trip reconcile, which fails loudly instead.
     #[serde(default)]
     pub failed: Vec<(String, String)>,
+}
+
+/// What a whole-library sync would move, before anything moves (#56): the plan
+/// the Go button confirms. Computed from a fresh cloud check per trip — the
+/// same one the sweep runs — so it is what the sweep would do right now.
+#[derive(Serialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncPlan {
+    /// Owed ops that would replay before the sweep starts.
+    pub replay: usize,
+    /// Trips with something to move, most work first is not implied — trip order.
+    pub trips: Vec<SyncPlanTrip>,
+    /// Trips whose cloud check couldn't reach the remote (nothing planned there).
+    pub offline: Vec<String>,
+}
+
+#[derive(Serialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncPlanTrip {
+    pub trip: String,
+    /// Your local-new clips that would upload.
+    pub push_clips: usize,
+    pub push_bytes: u64,
+    /// Clips in the cloud that would download.
+    pub pull_clips: usize,
+    pub pull_bytes: u64,
 }
 
 /// One place a clip lives — a `(trip, cloud-relative path)` location that may be on
@@ -543,12 +572,17 @@ pub struct PushProgress {
 #[serde(rename_all = "camelCase")]
 pub struct PushResult {
     pub trip: String,
-    /// Your masters now confirmed in the cloud.
+    /// What this run moved (#56): the files rclone uploaded. When nothing was
+    /// uploaded (everything already up) it is every master just re-verified —
+    /// the count the "already shared" line wants.
     pub files: usize,
     /// Their total size.
     pub bytes: u64,
     /// Bytes actually sent this run (0 → everything was already up).
     pub uploaded: u64,
+    /// A Stop landed between files (#56): `files`/`uploaded` are what landed
+    /// before it, nothing was verified or marked shared.
+    pub stopped: bool,
 }
 
 /// A person with footage in this trip's shared cloud that you could pull down.
@@ -606,9 +640,13 @@ pub struct PullProgress {
 pub struct PullResult {
     pub trip: String,
     pub person: String,
-    /// Masters now present locally under `<trip>/<person>/`.
+    /// Masters this run moved down (#56) — rclone skips ones already local, and
+    /// a stopped run reports what landed before it.
     pub files: usize,
+    /// Bytes this run moved.
     pub bytes: u64,
+    /// A Stop landed between files (#56); the baseline is untouched.
+    pub stopped: bool,
 }
 
 /// Summary handed back once `cloud_only` footage has been brought back down.
@@ -775,6 +813,11 @@ pub struct CutResult {
     pub kept: usize,
     pub removed: usize,
     pub failed: usize,
+    /// Marks in this run — the denominator for a "stopped after N of M" (#56).
+    pub count: usize,
+    /// The run stopped at a file boundary on request (#56); the clips made
+    /// before it are on disk, the rest are simply not made yet.
+    pub stopped: bool,
     /// Absolute path of the trip's `clips/` directory.
     pub dir: String,
 }

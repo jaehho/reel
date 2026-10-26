@@ -118,8 +118,14 @@ pub fn pull_person(
         src.into(),
         dst.as_os_str().to_os_string(),
     ];
+    let mut landed = 0usize; // files rclone reports done — what a stop keeps
+    let mut planned = 0usize; // totalTransfers: the leg's full set on success
+    let mut sent = 0u64; // bytes actually transferred this run
     let copied = rclone::stream(args, |v| {
         let s = &v["stats"];
+        landed = s["transfers"].as_u64().unwrap_or(0) as usize;
+        planned = s["totalTransfers"].as_u64().unwrap_or(0) as usize;
+        sent = sent.max(s["bytes"].as_u64().unwrap_or(0));
         let file = s["transferring"]
             .as_array()
             .and_then(|a| a.first())
@@ -133,6 +139,17 @@ pub fn pull_person(
         });
     })?;
     if !copied {
+        // A deliberate stop (#56): what landed is on disk and resumable. The
+        // baseline is untouched — run the pull again to finish.
+        if crate::cancel::stopped() {
+            return Ok(PullResult {
+                trip: trip.to_string(),
+                person: person.to_string(),
+                files: landed,
+                bytes: sent,
+                stopped: true,
+            });
+        }
         return Err("pull didn't finish — run it again to resume".into());
     }
 
@@ -153,15 +170,14 @@ pub fn pull_person(
         }
     });
 
-    let bytes = masters
-        .iter()
-        .filter_map(|p| fs::metadata(p).ok())
-        .map(|m| m.len())
-        .sum();
     Ok(PullResult {
         trip: trip.to_string(),
         person: person.to_string(),
-        files: masters.len(),
-        bytes,
+        // What this run moved (#56) — the count a "stopped after N of M" and
+        // the "Pulled N clips" toast both want, not everything now on disk.
+        // rclone exiting zero means every planned transfer finished.
+        files: landed.max(planned),
+        bytes: sent,
+        stopped: false,
     })
 }

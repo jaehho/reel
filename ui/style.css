@@ -2567,6 +2567,43 @@ body.org-dragging .org-lane {
   height: 4px;
   opacity: 0.7;
 }
+/* The plan the Go button confirms (#56): one row per trip with work */
+.sync-plan {
+  margin-top: 4px;
+}
+.plan-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 210px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+}
+.plan-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border-radius: var(--radius-xs);
+}
+.plan-row .log-name {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plan-row .log-note {
+  flex: none;
+  color: var(--muted);
+}
+.plan-row.offline .log-note {
+  color: var(--warn);
+}
 /* per-trip running log: each trip a row that ticks from busy → done */
 .sync-log {
   list-style: none;

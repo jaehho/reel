@@ -5480,3 +5480,43 @@ fn review_state_round_trips_and_resumes_the_last_clip() {
     assert_eq!(pl.last, None);
     assert!(pl.watched.is_empty());
 }
+
+/// The shared stop token (#56): armed before a job, nothing moves, the partial
+/// result reports zero, and a push never claims a trip shared without proof.
+#[test]
+fn an_armed_stop_keeps_a_push_from_claiming_anything() {
+    if !have_rclone() {
+        eprintln!("rclone not found; skipping push test");
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    let cloud = d.path().join("cloud");
+    fs::create_dir_all(&state).unwrap();
+    let trip = make_trip(&lib, "bali");
+    touch(
+        &trip.join("jaeho/dji/DJI_0001.MP4"),
+        1,
+        2_000_000,
+        1_700_000_000,
+    );
+    let mut c = cfg(&lib, &state, None);
+    c.remote = cloud.display().to_string();
+
+    reel_core::request_stop();
+    let res = reel_core::push_trip(&c, "bali", |_| {}).expect("a stop is not an error");
+    reel_core::reset_stop();
+    assert_eq!(res.files, 0, "nothing landed before the stop");
+    assert_eq!(res.uploaded, 0);
+    assert_ne!(
+        reel_core::trips::trip_meta(&trip, "share").as_deref(),
+        Some("shared"),
+        "a stopped push never marks the trip shared"
+    );
+
+    // The next run starts clean — the stop is one user action's worth.
+    let res = reel_core::push_trip(&c, "bali", |_| {}).expect("re-push ok");
+    assert_eq!(res.files, 1);
+    assert_eq!(res.uploaded, 2_000_000);
+}

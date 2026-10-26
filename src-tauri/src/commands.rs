@@ -6,7 +6,8 @@ use reel_core::{
     CutResult, DeletePreview, DeleteResult, DupProgress, DupReport, DupResolution,
     DupResolveResult, ImportProgress, ImportResult, Mark, MoveResult, Playlist, PullProgress,
     PullResult, PushProgress, PushResult, ReclaimPlan, ReclaimResult, Sharee, StillResult,
-    SyncActions, SyncProgress, SyncResult, TimelineResult, Trip, TripShare, TripSync, WipeProgress,
+    SyncActions, SyncPlan, SyncProgress, SyncResult, TimelineResult, Trip, TripShare, TripSync,
+    WipeProgress,
 };
 use std::path::Path;
 use tauri::ipc::Channel;
@@ -572,6 +573,7 @@ pub async fn sync_trip(
 ) -> Result<SyncResult, String> {
     let cfg = Config::from_env();
     match tauri::async_runtime::spawn_blocking(move || {
+        reel_core::reset_stop(); // one per-trip reconcile is one user action (#56)
         reel_core::reconcile(&cfg, &trip, actions, |p| {
             let _ = channel.send(p);
         })
@@ -670,6 +672,38 @@ pub async fn sync_all(channel: Channel<SyncProgress>) -> Result<SyncResult, Stri
         Ok(result) => result,
         Err(join) => Err(format!("sync-all task failed: {join}")),
     }
+}
+
+/// What `sync_all` would move, checked first and transferred never (#56) —
+/// the plan the topbar Sync shows before its Go button does anything.
+#[tauri::command]
+pub async fn sync_plan(channel: Channel<SyncProgress>) -> Result<SyncPlan, String> {
+    let cfg = Config::from_env();
+    match tauri::async_runtime::spawn_blocking(move || {
+        reel_core::reset_stop(); // planning is its own user action (#56)
+        reel_core::plan_all(&cfg, |p| {
+            let _ = channel.send(p);
+        })
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(join) => Err(format!("sync-plan task failed: {join}")),
+    }
+}
+
+/// Arm the shared stop token (#56). The job in flight notices at its next file
+/// boundary; share and cut read the same token.
+#[tauri::command]
+pub fn job_stop() {
+    reel_core::request_stop();
+}
+
+/// Disarm the stop token — for a UI-owned job start (a share drain) that has no
+/// single engine entry point to do it.
+#[tauri::command]
+pub fn job_reset() {
+    reel_core::reset_stop();
 }
 
 /// Scan the whole library and cloud for duplicate clips — the same clip living in

@@ -122,13 +122,22 @@ pub fn remote_ok(remote: &str) -> Result<(), String> {
 }
 
 /// Run `rclone <args…>` with JSON-log stats appended, calling `on_stats` with each
-/// stats object as it streams on stderr. Returns whether rclone exited zero. The
-/// caller passes the subcommand and its operands; the stats flags are added here.
+/// stats object as it streams on stderr. Returns whether rclone exited zero and
+/// no stop was involved. The caller passes the subcommand and its operands; the
+/// stats flags are added here.
+///
+/// A stop request (#56) becomes SIGINT to rclone: its own graceful shutdown
+/// finishes the file in flight and starts no new one — exactly "between files".
+/// The log is drained to EOF afterwards, so the closing stats writes don't hit
+/// a broken pipe before that file has landed.
 pub fn stream<I, S>(args: I, mut on_stats: impl FnMut(&Value)) -> Result<bool, String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    if crate::cancel::stopped() {
+        return Ok(false);
+    }
     let mut child = Command::new("rclone")
         .args(args)
         .args([
@@ -142,6 +151,7 @@ where
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("couldn't run rclone: {e}"))?;
+    let mut stopping = false;
 
     // Each stderr line is a JSON log record; the ones carrying a `stats` object
     // drive progress. Non-stats lines (per-file notices) are ignored.
@@ -150,12 +160,19 @@ where
             if let Ok(v) = serde_json::from_str::<Value>(&line) {
                 if v.get("stats").is_some() {
                     on_stats(&v);
+                    if !stopping && crate::cancel::stopped() {
+                        stopping = true;
+                        unsafe {
+                            libc::kill(child.id() as libc::pid_t, libc::SIGINT);
+                        }
+                    }
                 }
             }
         }
     }
-    child
+    let ok = child
         .wait()
         .map(|s| s.success())
-        .map_err(|e| format!("rclone wait failed: {e}"))
+        .map_err(|e| format!("rclone wait failed: {e}"))?;
+    Ok(ok && !stopping)
 }
