@@ -2342,6 +2342,11 @@ body.org-dragging .org-lane {
   max-height: 340px;
   overflow-y: auto;
 }
+/* The duplicates list scrolls inside its dialog so the Prune foot stays on
+   screen (#58) — at 760x520 it used to sit below the fold at y=523. */
+#dedup-dialog .pull-list {
+  max-height: min(340px, 45vh);
+}
 /* "Add a friend" row in the Sharing panel: a username box + Share button. */
 .share-add {
   display: flex;
