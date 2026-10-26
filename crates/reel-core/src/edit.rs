@@ -17,8 +17,9 @@ fn valid_trip(name: &str) -> bool {
 }
 
 /// Is `bin` present on `PATH`? A cheap lookup so a missing editor gets a friendly
-/// message up front instead of a raw spawn error.
-fn on_path(bin: &str) -> bool {
+/// message up front instead of a raw spawn error. Shared with `reveal`'s
+/// xdg-open check.
+pub(crate) fn on_path(bin: &str) -> bool {
     std::env::var_os("PATH")
         .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file()))
 }

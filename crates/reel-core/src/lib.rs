@@ -25,6 +25,7 @@ pub mod push;
 pub mod rclone;
 pub mod remove;
 pub mod restore;
+pub mod reveal;
 pub mod review;
 pub mod serve;
 pub mod sessions;
@@ -59,6 +60,7 @@ pub use pull::{cloud_contributors, pull_person};
 pub use push::push_trip;
 pub use remove::{clear_discarded, delete_clips, delete_trip, delete_trip_preview};
 pub use restore::restore;
+pub use reveal::reveal_path;
 pub use review::{card_playlist, review_playlist, save_marks};
 pub use share::{
     add_share, known_sharees, list_shares, remove_share, search_sharees, sharing_available,

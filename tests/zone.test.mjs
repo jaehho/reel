@@ -214,6 +214,70 @@ p = pressI({});
 check("i past a one-shot zone's end seeks nothing", p.seen.seeks, 0);
 check("...and pauses nothing", p.seen.pauses, 0);
 
+// Toasts (#57): the stay scales with the length of the line, an error waits to
+// be dismissed instead of vanishing mid-read, and a toast may carry one action.
+const toastCode = [
+  "let toastTimer;",
+  grab(/function toastStay\(msg\) \{[\s\S]*?\n\}/, "toastStay"),
+  grab(/function hideToast\(\) \{[\s\S]*?\n\}/, "hideToast"),
+  grab(/function toast\(msg, opts = \{\}\) \{[\s\S]*?\n\}/, "toast"),
+].join("\n");
+const toastBox = () => {
+  const seen = { timers: [], logs: [], kids: [] };
+  const node = {
+    hidden: true,
+    innerHTML: "",
+    attrs: {},
+    classList: { toggle() {}, add() {}, remove() {} },
+    setAttribute(k, v) {
+      node.attrs[k] = v;
+    },
+    append(...xs) {
+      seen.kids.push(...xs);
+    },
+  };
+  const stubs = {
+    $: () => node,
+    el: (tag, cls, text) => ({
+      tag,
+      cls,
+      text,
+      attrs: {},
+      type: "",
+      onclick: null,
+      setAttribute(k, v) {
+        this.attrs[k] = v;
+      },
+    }),
+    logf: (lv, m) => seen.logs.push([lv, m]),
+    requestAnimationFrame: (f) => f(),
+    setTimeout: (f, ms) => (seen.timers.push(ms), seen.timers.length),
+    clearTimeout: () => {},
+  };
+  const names = Object.keys(stubs);
+  const api = new Function(...names, `${toastCode}; return { toast, toastStay, hideToast };`)(...names.map((k) => stubs[k]));
+  return { ...api, seen, node };
+};
+const tb = toastBox();
+check("toast: the stay is 4 s plus 40 ms per character", tb.toastStay("12345"), 4200);
+tb.toast("Cut 3 clips");
+check("toast: a line that isn't an error times out", json(tb.seen.timers), json([4000 + 40 * "Cut 3 clips".length]));
+check("toast: and announces itself politely", tb.node.attrs.role, "status");
+tb.seen.timers.length = 0;
+tb.seen.kids.length = 0;
+tb.toast("delete failed", { kind: "error" });
+check("toast: an error never times out", json(tb.seen.timers), json([]));
+check("toast: an error announces loudly", tb.node.attrs.role, "alert");
+check("toast: an error gets a dismiss control", tb.seen.kids.some((k) => k.cls === "toast-x"), true);
+check("toast: an error logs at warn", tb.seen.logs[tb.seen.logs.length - 1][0], "warn");
+tb.seen.kids.length = 0;
+let acted = 0;
+tb.toast("Cut 3 clips", { action: { label: "Open folder", run: () => acted++ } });
+const act = tb.seen.kids.find((k) => k.cls === "toast-act");
+check("toast: an action button carries its label", act && act.text, "Open folder");
+act.onclick();
+check("toast: clicking it runs the action", acted, 1);
+
 // Deleting a trip must say what it erases and from where, and make you type the
 // name when the cloud holds the only copy (#52). An archived trip has no local
 // clips, and its confirm used to read "0 clips" over all of its footage. The

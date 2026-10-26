@@ -163,6 +163,7 @@ fn main() {
             commands::cut_trip,
             commands::grab_still,
             commands::open_in_editor,
+            commands::reveal_path,
             commands::clip_health,
             commands::move_clips,
             commands::rename_trip,

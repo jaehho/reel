@@ -352,6 +352,19 @@ pub async fn open_in_editor(trip: String) -> Result<TimelineResult, String> {
     }
 }
 
+/// Reveal a path in the file manager — the trip's folder, its `clips/` after a
+/// Cut, or any folder a toast offers to open (#57). Detached engine-side, so
+/// closing reel never closes the window.
+#[tauri::command]
+pub async fn reveal_path(path: String) -> Result<(), String> {
+    match tauri::async_runtime::spawn_blocking(move || reel_core::reveal_path(Path::new(&path)))
+        .await
+    {
+        Ok(result) => result,
+        Err(join) => Err(format!("reveal task failed: {join}")),
+    }
+}
+
 /// Probe a clip's playability (one ffprobe over headers) so the UI can flag an
 /// empty, too-brief, or corrupt clip up front rather than waiting out a doomed
 /// load. Runs off the UI thread; on any task failure it reports healthy so a

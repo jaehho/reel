@@ -174,16 +174,55 @@ const cutProgress = new Map();
 let shareDraining = false;
 
 let toastTimer;
-function toast(msg) {
+// How long a line stays up: long enough to read, without a 178-character
+// delete failure vanishing in 2.6 s. About 4 s plus 40 ms per character (#57).
+function toastStay(msg) {
+  return 4000 + 40 * msg.length;
+}
+// One line over the dashboard. `opts.kind === "error"` waits to be dismissed —
+// a move/delete/share/sync failure is evidence, not wallpaper — with selectable
+// text and a close button. Anything else scales its stay with its length and
+// may carry one action: "Review kyoto →" after an import, "Open folder" after
+// a Cut.
+function toast(msg, opts = {}) {
+  const kind = opts.kind || "info";
+  const action = opts.action || null;
   // Every toast is something the user saw. Logging them all gives the log the
   // one thing a bug report usually can't supply: what was on screen, and when.
-  logf("info", `toast: ${msg}`);
+  // A failure logs at warn, so `make errors` surfaces it.
+  logf(kind === "error" ? "warn" : "info", `toast: ${msg}`);
   const t = $("#toast");
-  t.textContent = msg;
+  t.innerHTML = "";
+  t.classList.toggle("err", kind === "error");
+  t.setAttribute("role", kind === "error" ? "alert" : "status");
+  t.append(el("span", "toast-msg", msg));
+  if (action) {
+    const b = el("button", "toast-act", action.label);
+    b.type = "button";
+    b.onclick = () => {
+      hideToast();
+      action.run();
+    };
+    t.append(b);
+  }
+  const x = el("button", "toast-x", "×");
+  x.type = "button";
+  x.setAttribute("aria-label", "Dismiss");
+  x.onclick = hideToast;
+  t.append(x);
   t.hidden = false;
   requestAnimationFrame(() => t.classList.add("show"));
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove("show"), 2600);
+  if (kind !== "error") toastTimer = setTimeout(hideToast, toastStay(msg));
+}
+function hideToast() {
+  clearTimeout(toastTimer);
+  $("#toast").classList.remove("show");
+}
+// Open a folder in the file manager. The engine launches it detached, so this
+// resolves as soon as the manager has been handed the path (#57).
+function revealPath(path) {
+  invoke("reveal_path", { path }).catch((e) => toast(String(e), { kind: "error" }));
 }
 
 // ---- thumbnails: a small queue so we don't spawn dozens of ffmpegs at once ----
@@ -912,7 +951,7 @@ async function pushTrip(t) {
     const res = await invoke("share_trip", { channel, trip: t.name });
     toast(shareSummary(res));
   } catch (e) {
-    toast(String(e));
+    toast(String(e), { kind: "error" });
   } finally {
     pushingTrips.delete(t.name);
     shareProgress.delete(t.name);
@@ -1042,9 +1081,11 @@ async function startCut(t) {
 
   try {
     const res = await invoke("cut_trip", { channel, trip: t.name });
-    toast(cutSummary(res));
+    toast(cutSummary(res), {
+      action: { label: "Open folder", run: () => revealPath(res.dir) },
+    });
   } catch (e) {
-    toast(String(e));
+    toast(String(e), { kind: "error" });
   } finally {
     cuttingTrips.delete(t.name);
     cutProgress.delete(t.name);
@@ -1077,7 +1118,7 @@ async function openInEditor(t) {
     else if (!tl.profileId) bits.push(`set the project profile to ${tl.profile} in Kdenlive`);
     toast(`Opening ${bits.join(" · ")}`);
   } catch (e) {
-    toast(String(e));
+    toast(String(e), { kind: "error" });
   }
 }
 
@@ -1228,7 +1269,16 @@ async function runImport() {
     importing = false;
     impCancel.disabled = false;
     dlg.close();
-    toast(importSummary(res));
+    toast(importSummary(res), {
+      action: {
+        label: `Review ${res.trip} →`,
+        run: () => {
+          const t = lastTrips.find((x) => x.name === res.trip);
+          if (t) openReview(t);
+          else toast(`${res.trip} isn't on the dashboard yet — rescan and try again.`, { kind: "error" });
+        },
+      },
+    });
     await load();
   } catch (e) {
     importing = false;
@@ -1686,14 +1736,14 @@ async function openReview(t) {
   try {
     pl = await invoke("review_playlist", { trip: t.name });
   } catch (e) {
-    return toast(String(e));
+    return toast(String(e), { kind: "error" });
   }
   if (!P.clipBase) {
     // Resolve the loopback server once; <video> can't stream without it.
     try {
       P.clipBase = await invoke("clip_base");
     } catch (e) {
-      return toast("couldn't reach the clip server: " + String(e));
+      return toast("couldn't reach the clip server: " + String(e), { kind: "error" });
     }
   }
   Object.assign(P, {
@@ -1732,14 +1782,14 @@ async function openCardPreview(win, label) {
   try {
     pl = await invoke("card_playlist", { start: win ? win[0] : null, end: win ? win[1] : null });
   } catch (e) {
-    return toast(String(e));
+    return toast(String(e), { kind: "error" });
   }
   if (!pl.clips.length) return toast("Nothing to preview here.");
   if (!P.clipBase) {
     try {
       P.clipBase = await invoke("clip_base");
     } catch (e) {
-      return toast("couldn't reach the clip server: " + String(e));
+      return toast("couldn't reach the clip server: " + String(e), { kind: "error" });
     }
   }
   Object.assign(P, {
@@ -2142,7 +2192,7 @@ async function grabStill() {
   try {
     s = await invoke("grab_still", { master: c.master, t });
   } catch (e) {
-    return toast(String(e));
+    return toast(String(e), { kind: "error" });
   }
   const at = P.clips.findIndex((x) => x.master === c.master);
   if (at >= 0 && !P.clips.some((x) => x.master === s.path)) {
@@ -2636,7 +2686,7 @@ async function saveMarks() {
       marks: P.marks.map((m) => ({ master: m.master, start: m.start, end: m.end, label: m.label })),
     });
   } catch (e) {
-    toast(`Couldn't save marks: ${e}`);
+    toast(`Couldn't save marks: ${e}`, { kind: "error" });
   }
 }
 
@@ -3473,6 +3523,10 @@ function openTripMenu(anchor, t, opts = {}) {
   items.push({ label: "Pull from cloud…", run: () => openPull(t) });
   items.push({ label: "Sharing…", run: () => openShare(t) });
   items.push({ sep: true });
+  items.push({ label: "Open trip folder", run: () => revealPath(t.path) });
+  // `clips/` is where Cut writes (CutResult.dir) — only offer it once one exists.
+  if (t.clips > 0) items.push({ label: "Open cut clips", run: () => revealPath(`${t.path}/clips`) });
+  items.push({ sep: true });
   items.push({ label: "Delete trip…", danger: true, run: () => deleteTripConfirm(t) });
   openMenu(anchor, items);
 }
@@ -3524,7 +3578,7 @@ async function renameTrip(t) {
     toast(`Renamed to ${r.dest}${r.cloudSynced ? "" : " · cloud move queued — Sync to apply"}`);
     await load();
   } catch (e) {
-    toast(String(e));
+    toast(String(e), { kind: "error" });
   }
 }
 async function mergeTripInto(t) {
@@ -3540,7 +3594,7 @@ async function mergeTripInto(t) {
     toast(`Moved ${plural(r.moved, "clip")} into ${dst}${r.skipped ? ` · ${r.skipped} already there` : ""}`);
     await load();
   } catch (e) {
-    toast(String(e));
+    toast(String(e), { kind: "error" });
   }
 }
 // What deleting a trip erases and from where, from `delete_trip_preview` (local
@@ -3567,7 +3621,7 @@ async function deleteTripConfirm(t) {
   try {
     plan = deleteTripPlan(t.name, await invoke("delete_trip_preview", { trip: t.name }));
   } catch (e) {
-    return toast(String(e));
+    return toast(String(e), { kind: "error" });
   }
   const ok = await confirmDanger({
     title: `Delete ${t.name}`,
@@ -3581,7 +3635,7 @@ async function deleteTripConfirm(t) {
     toast(deleteSummary(r));
     await load();
   } catch (e) {
-    toast(String(e));
+    toast(String(e), { kind: "error" });
   }
 }
 
@@ -3598,7 +3652,7 @@ async function clearTrash(s) {
     toast(`Cleared ${plural(r.deleted, "clip")} · ${fmtBytes(r.bytes)} from the card`);
     await load();
   } catch (e) {
-    toast(String(e));
+    toast(String(e), { kind: "error" });
   }
 }
 
@@ -3624,7 +3678,7 @@ async function moveCurrentClip() {
       dropClipFromPlayer(c);
     } else toast(r.skipped ? `Already in ${dest}` : "Nothing moved.");
   } catch (e) {
-    toast(String(e));
+    toast(String(e), { kind: "error" });
   }
 }
 async function deleteCurrentClip() {
@@ -3645,7 +3699,7 @@ async function deleteCurrentClip() {
     toast(deleteSummary(r));
     dropClipFromPlayer(c);
   } catch (e) {
-    toast(String(e));
+    toast(String(e), { kind: "error" });
   }
 }
 // After a clip moves or is deleted, drop it from the open player and keep the
@@ -3741,7 +3795,7 @@ async function openOrganize(focusName = null) {
     try {
       lastTrips = await invoke("list_trips");
     } catch (e) {
-      return toast(String(e));
+      return toast(String(e), { kind: "error" });
     }
   }
   if (!lastTrips.length) return toast("No trips to organize yet.");
@@ -4002,7 +4056,7 @@ async function orgMoveMasters(masters, dest) {
     );
     await refreshOrg();
   } catch (e) {
-    toast(String(e));
+    toast(String(e), { kind: "error" });
   }
 }
 // "name (trip)" lines for a delete confirm, so the dialog says *which* clips go —
@@ -4034,7 +4088,7 @@ async function orgDeleteMasters(masters) {
     toast(deleteSummary(r));
     await refreshOrg();
   } catch (e) {
-    toast(String(e));
+    toast(String(e), { kind: "error" });
   }
 }
 // Rebuild the board from disk after a move/delete (dupes may have been skipped,

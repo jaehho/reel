@@ -830,6 +830,9 @@ main {
 }
 
 /* ---- toast ---- */
+/* A toast is readable evidence, and sometimes a door ("Open folder") — not a
+   blink. Its stay scales with its length, an error waits to be dismissed, and
+   the text can be selected (#57). */
 .toast {
   position: fixed;
   bottom: 24px;
@@ -838,7 +841,7 @@ main {
   background: var(--raise);
   border: 1px solid var(--line);
   color: var(--text);
-  padding: 11px 17px;
+  padding: 10px 10px 10px 16px;
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow);
   font-size: 13px;
@@ -847,10 +850,55 @@ main {
   pointer-events: none;
   z-index: 60;
   max-width: min(440px, 90vw);
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 .toast.show {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
+  pointer-events: auto;
+}
+.toast.err {
+  border-color: color-mix(in oklab, var(--warn) 45%, transparent);
+}
+.toast-msg {
+  user-select: text;
+  cursor: text;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.toast-act {
+  flex: none;
+  font: inherit;
+  font-weight: 650;
+  font-size: 12px;
+  color: var(--on-btn);
+  background: var(--btn);
+  border: none;
+  border-radius: var(--radius-xs);
+  padding: 5px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.toast-act:hover {
+  background: var(--btn-strong);
+}
+.toast-x {
+  flex: none;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--faint);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-xs);
+  padding: 5px 7px;
+  cursor: pointer;
+}
+.toast-x:hover {
+  color: var(--text);
+  background: var(--surface-2);
 }
 
 /* ---- import dialog ---- */
