@@ -23,7 +23,7 @@ use crate::config::Config;
 use crate::media::{masters_in, rel_stem};
 use crate::model::{CutProgress, CutResult, Mark};
 use crate::review::read_marks;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::UNIX_EPOCH;
@@ -162,6 +162,17 @@ fn read_manifest(clips: &Path) -> Vec<Made> {
             })
         })
         .collect()
+}
+
+/// How many cut clips each master has produced (#58), read from the manifest —
+/// what the dedup rows and organize cells show before asking you to prune or
+/// move a copy.
+pub(crate) fn cuts_by_master(clips: &Path) -> HashMap<String, usize> {
+    let mut out: HashMap<String, usize> = HashMap::new();
+    for r in read_manifest(clips) {
+        *out.entry(r.master).or_default() += 1;
+    }
+    out
 }
 
 /// Read-modify-write the manifest under the state lock, so the rows a concurrent

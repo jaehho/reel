@@ -1990,6 +1990,64 @@ async function openCardPreview(win, label) {
   loadClip(resumeIndex(P.clips, pl.last, firstPlayable()), null, 1);
 }
 
+// Read-only look at one clip (#58) — the dedup rows and organize cells are
+// deciding its fate, and "which one is this?" needs the picture without leaving
+// the screen. The card-preview mode: no marks, no move/delete; proxies build
+// into the cache. `c` is a DupCopy or a ReviewClip (its path or master).
+async function openClipPreview(c) {
+  if (P.open) return;
+  parkFocus();
+  const master = c.master || c.path;
+  if (!master) return toast("That copy is in the cloud only — nothing here to play.");
+  if (!P.clipBase) {
+    try {
+      P.clipBase = await invoke("clip_base");
+    } catch (e) {
+      return toast("couldn't reach the clip server: " + String(e), { kind: "error" });
+    }
+  }
+  const name = c.name || master.split("/").pop();
+  const clip = {
+    master,
+    play: c.play || master,
+    poster: c.poster || master,
+    name,
+    fileid: c.fileid || "",
+    captured: c.captured || 0,
+    bytes: c.bytes || 0,
+    proxied: !!c.proxied,
+    hasProxy: !!c.hasProxy,
+    stub: false, // loadClip's health probe flags what can't play
+    photo: c.photo ?? /\.(jpe?g|png|heic|webp)$/i.test(name),
+    person: c.person || "",
+    mine: c.mine ?? true,
+  };
+  Object.assign(P, {
+    open: true,
+    preview: true,
+    trip: "clip", // sentinel — never a real trip in preview
+    clips: [clip],
+    marks: [],
+    i: 0,
+    selected: null,
+    pendingIn: null,
+    seekAfterLoad: null,
+  });
+  P.watched = new Set();
+  P.reviewLast = null;
+  P.reviewDirty = false;
+  const player = $("#player");
+  player.classList.add("preview");
+  player.style.setProperty("--tc", "#8a8f98"); // neutral — a look, not a trip
+  $("#player-trip").textContent = name;
+  player.hidden = false;
+  document.body.classList.add("reviewing");
+  setPlayIcon(false);
+  renderMarks();
+  renderFilmstrip();
+  loadClip(0, null, 1);
+}
+
 // Index of the next clip that can actually play from `from` in direction `dir`
 // (+1/-1), skipping stubs (empty placeholder clips); -1 if there's none that way.
 function nextPlayable(from, dir) {
@@ -4151,6 +4209,17 @@ function mkLane(lane, li) {
     el("span", "org-lane-name", lane.name),
     el("span", "org-lane-count tnum", String(lane.clips.length))
   );
+  // What the trip already holds (#58): marks, cuts, size and its capture window
+  // — a lane is a destination, and a name alone says nothing about the fit.
+  if (t) {
+    const bits = [];
+    if (t.marks) bits.push(`${t.marks} mark${t.marks === 1 ? "" : "s"}`);
+    if (t.clips) bits.push(`${t.clips} cut${t.clips === 1 ? "" : "s"}`);
+    bits.push(fmtBytes(t.bytes));
+    const span = t.from && t.to && t.from !== t.to ? `${t.from} → ${t.to}` : t.from || t.to || "";
+    if (span) bits.push(span);
+    id.append(el("div", "org-lane-facts tnum", bits.join(" · ")));
+  }
   // clicking the header (not the ⋯) grabs / releases the whole lane
   id.onclick = () => selectLane(li);
   id.title = "Select all clips in this trip";
@@ -4204,8 +4273,24 @@ function mkCell(c, li, idx) {
   // provenance only when it isn't yours — "you" on every clip is just noise, so
   // an unbadged cell reads as yours and a badge singles out someone else's footage
   if (!c.mine) cell.append(el("span", "org-who", c.person));
+  // What the clip already carries (#58) — marks and cuts, so a cell isn't just
+  // a thumbnail and a filename when you're deciding where it belongs.
+  const marks = c.marks || 0,
+    cuts = c.cuts || 0;
+  if (marks || cuts) {
+    const st = el("span", "org-facts tnum");
+    if (marks) st.append(el("span", "org-fact marks", `${marks}m`));
+    if (cuts) st.append(el("span", "org-fact cuts", `${cuts}c`));
+    cell.append(st);
+  }
   cell.append(el("span", "org-tick", "✓"), el("span", "org-name", c.name));
   cell.onclick = (e) => toggleCell(c.master, li, idx, e.shiftKey);
+  // Double-click looks at the clip (#58) — the board is deciding its home
+  // without ever having watched it.
+  cell.ondblclick = (e) => {
+    e.preventDefault();
+    openClipPreview(c);
+  };
   cell.ondragstart = (e) => orgDragStart(e, c.master);
   cell.ondragend = () => document.body.classList.remove("org-dragging");
   return cell;
@@ -4316,7 +4401,22 @@ async function orgMoveMasters(masters, dest) {
   ORG.drag = null;
   if (!masters.length) return;
   if (!dest) {
-    dest = await pickTrip({ title: `Move ${plural(masters.length, "clip")}`, confirmLabel: "Move" });
+    // Name what moves and where from (#58): with nothing selected this dialog
+    // used to read "Move 1 clip" over an invisible keyboard focus, and offered
+    // the trip it was already in among the destinations.
+    const hits = masters.map((m) => ORG.byMaster.get(m)).filter(Boolean);
+    const names = hits.map((h) => h.clip.name);
+    const meta =
+      names.length === 1
+        ? `${names[0]} (${ORG.lanes[hits[0]?.lane]?.name || "?"})`
+        : `${names.slice(0, 3).join(", ")}${names.length > 3 ? ` +${names.length - 3} more` : ""}`;
+    const srcLanes = [...new Set(hits.map((h) => ORG.lanes[h.lane]?.name).filter(Boolean))];
+    dest = await pickTrip({
+      title: `Move ${plural(masters.length, "clip")}`,
+      meta,
+      confirmLabel: "Move",
+      exclude: srcLanes.length === 1 ? srcLanes[0] : null,
+    });
     if (!dest) return;
   }
   try {
@@ -4380,9 +4480,10 @@ $("#org-delete").addEventListener("click", () => orgDeleteMasters([...ORG.sel]))
 $("#organize-open").addEventListener("click", () => openOrganize());
 
 // Keyboard on the board: ←/→ walk clips (across lanes), ↑/↓ jump a row within the
-// focused lane, space toggles selection, shift+arrows extend it, ctrl+a selects
-// all; m moves and ⌫/Del deletes the selection (or the focused clip if nothing's
-// picked). All gated on the board being open with no dialog over it.
+// focused lane, space looks at the clip (read-only), enter toggles selection,
+// shift+arrows extend it, ctrl+a selects all; m moves and ⌫/Del deletes the
+// selection (or the focused clip if nothing's picked). All gated on the board
+// being open with no dialog over it.
 function orgKey(e) {
   if (!ORG.open || document.querySelector("dialog[open]")) return;
   const tgt = e.target;
@@ -4444,8 +4545,17 @@ function orgKey(e) {
       paintOrgFocus();
       break;
     case " ": {
+      // Space looks at the clip (#58) — the board is moving this footage around
+      // without ever having watched it. Enter toggles selection, like a click.
       e.preventDefault();
       const f = ORG.flat[ORG.focus];
+      if (f) openClipPreview(ORG.byMaster.get(f.master)?.clip ?? { master: f.master, name: "" });
+      break;
+    }
+    case "Enter": {
+      e.preventDefault();
+      const f = ORG.flat[ORG.focus];
+      if (!f) break;
       ORG.sel.has(f.master) ? ORG.sel.delete(f.master) : ORG.sel.add(f.master);
       ORG.anchor = { lane: f.lane, idx: f.idx };
       repaintOrgSel();
@@ -5224,7 +5334,30 @@ function renderDedup() {
       where.textContent = `${c.trip} / ${c.person}`; // trip + person — textContent
       const badge = el("span", "dup-loc " + (c.local && c.inCloud ? "both" : c.local ? "local" : "cloud"));
       badge.textContent = c.local && c.inCloud ? "local + cloud" : c.local ? "local only" : "cloud only";
-      lab.append(rb, where, badge);
+      // What each copy carries (#58): size, capture time, marks and cuts — the
+      // evidence for which one to keep, not just where it lives.
+      const facts = el("span", "dup-facts tnum");
+      const bits = [fmtBytes(c.bytes)];
+      if (c.captured) bits.push(fmtDay(new Date(c.captured * 1000)));
+      if (c.marks) bits.push(`${c.marks} mark${c.marks === 1 ? "" : "s"}`);
+      if (c.cuts) bits.push(`${c.cuts} cut${c.cuts === 1 ? "" : "s"}`);
+      facts.textContent = bits.join(" · ");
+      lab.append(rb, where, badge, facts);
+      // Double-click (or Space on the row) looks at the copy (#58) — the picker
+      // is deciding this clip's fate without ever having seen it.
+      if (c.path) {
+        lab.tabIndex = 0;
+        lab.title = "Double-click to look at this copy";
+        lab.ondblclick = (e) => {
+          e.preventDefault();
+          openClipPreview(c);
+        };
+        lab.onkeydown = (e) => {
+          if (e.key !== " " && e.key !== "Enter") return;
+          e.preventDefault();
+          openClipPreview(c);
+        };
+      }
       copies.append(lab);
     });
     row.append(copies);
@@ -5232,33 +5365,82 @@ function renderDedup() {
     list.append(row);
   }
 
+  // One switch for the whole list (#58): every group starts checked, so without
+  // this Prune acts on all of them unless you untick one by one.
+  if (d.groups.length) {
+    const all = el("label", "dup-all");
+    const box = el("input");
+    box.type = "checkbox";
+    box.checked = true;
+    box.onchange = () => {
+      for (const g of d.groups) dedupOn[g.key] = box.checked;
+      for (const row of list.querySelectorAll(".dup-group")) row.classList.toggle("off", !box.checked);
+      for (const inc of list.querySelectorAll(".dup-inc")) inc.checked = box.checked;
+      updateDedupGo();
+    };
+    all.append(box, el("span", null, `Include all ${plural(d.groups.length, "group")}`));
+    list.prepend(all);
+  }
+
   if (!d.groups.length)
     list.append(el("div", "empty-note", d.offline ? "Can't reach the cloud right now." : "No duplicate clips — everything lives in one place."));
   updateDedupGo();
 }
 
+// What the current ticks would prune (#58): how many copies go, and the bytes
+// that frees. Pure, so the button's claim can be pinned in a test.
+function dedupPruneTally(groups, on) {
+  let copies = 0;
+  let bytes = 0;
+  for (const g of groups) {
+    if (!on[g.key]) continue;
+    copies += g.copies.length - 1;
+    bytes += g.reclaimable;
+  }
+  return { copies, bytes };
+}
 function updateDedupGo() {
-  const any = dedupData && dedupData.groups.some((g) => dedupOn[g.key]);
-  $("#dedup-go").disabled = !any;
+  const t = dedupData ? dedupPruneTally(dedupData.groups, dedupOn) : { copies: 0, bytes: 0 };
+  const go = $("#dedup-go");
+  go.disabled = !t.copies;
+  go.textContent = t.copies ? `Prune ${t.copies} · frees ${fmtBytes(t.bytes)}` : "Prune";
 }
 
 function dedupLoc(c) {
   return { trip: c.trip, rel: c.rel, local: c.local, inCloud: c.inCloud, bytes: c.bytes };
 }
 
+// "Delete 5 local copies (3 in kyoto, 2 in iceland) …" — the confirm names the
+// trips that lose what (#58). Pure, so the counts can be pinned in a test.
+function dedupConfirmBody(resolutions) {
+  const byTrip = new Map();
+  let local = 0;
+  let cloud = 0;
+  for (const res of resolutions) {
+    for (const rm of res.remove) {
+      if (rm.local) {
+        local++;
+        byTrip.set(rm.trip, (byTrip.get(rm.trip) || 0) + 1);
+      }
+      if (rm.inCloud) cloud++;
+    }
+  }
+  const trips = [...byTrip.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const where = trips.map(([t, n]) => `${n} in ${esc(t)}`).join(", ");
+  const parts = [];
+  if (local) parts.push(`<strong>${local}</strong> local ${local === 1 ? "copy" : "copies"}${where ? ` (${where})` : ""}`);
+  if (cloud) parts.push(`${cloud} cloud ${cloud === 1 ? "copy" : "copies"} of your own footage`);
+  const scope = parts.length ? parts.join(", plus ") : "the selected duplicates";
+  return `Delete ${scope}. The kept copy is verified present first. This can't be undone.`;
+}
+
 async function startDedup() {
   if (!dedupData) return;
   const resolutions = [];
-  let localGone = 0;
-  let anyCloud = false;
   for (const g of dedupData.groups) {
     if (!dedupOn[g.key]) continue;
     const keepIdx = dedupPick[g.key] ?? g.suggestedKeep;
     const remove = g.copies.filter((_, i) => i !== keepIdx).map(dedupLoc);
-    for (const rm of remove) {
-      if (rm.local) localGone++;
-      if (rm.inCloud) anyCloud = true;
-    }
     resolutions.push({ keep: dedupLoc(g.copies[keepIdx]), remove });
   }
   if (!resolutions.length) return;
@@ -5266,13 +5448,9 @@ async function startDedup() {
   // Dedup unlinks local masters and deletes your cloud objects — the same weight as
   // every other destructive path, which all gate on a confirm. This one used to go
   // straight through on the checkbox state alone.
-  const parts = [];
-  if (localGone) parts.push(`<strong>${localGone}</strong> local ${localGone === 1 ? "copy" : "copies"}`);
-  if (anyCloud) parts.push("cloud copies of your own footage");
-  const scope = parts.length ? parts.join(", plus ") : "the selected duplicates";
   const ok = await confirmDanger({
     title: "Prune duplicates",
-    body: `Delete ${scope}. The kept copy is verified present first. This can't be undone.`,
+    body: dedupConfirmBody(resolutions),
     confirmLabel: "Prune",
   });
   if (!ok) return;

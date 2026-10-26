@@ -2123,6 +2123,35 @@ body.organizing {
   color: var(--muted);
   font-size: 12px;
 }
+/* What the trip already holds (#58) — a second line under the lane's name */
+.org-lane-id {
+  flex-wrap: wrap;
+}
+.org-lane-facts {
+  flex-basis: 100%;
+  margin-left: 18px;
+  color: var(--faint);
+  font-size: 11px;
+}
+/* marks/cuts badges on a cell (#58) */
+.org-facts {
+  position: absolute;
+  right: 6px;
+  top: 6px;
+  display: flex;
+  gap: 4px;
+}
+.org-fact {
+  font-size: 10px;
+  font-weight: 650;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--text);
+  background: color-mix(in oklab, var(--bg) 62%, transparent);
+}
+.org-fact.marks {
+  color: var(--tc);
+}
 .org-lane-menu {
   flex: none;
   border: none;
@@ -2264,14 +2293,19 @@ body.organizing {
 body.org-dragging .org-cell {
   cursor: grabbing;
 }
-/* the trailing "+ New trip" lane: a dashed drop target that names a fresh trip */
+/* the trailing "+ New trip" lane: a dashed drop target that names a fresh trip.
+   Pinned to the bottom of the board (#58) — a 21-lane board used to park it a
+   full screen below the fold, where no drop ever reached it. */
 .org-lane.new {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
   flex: none;
   align-items: center;
   justify-content: center;
   padding: 14px;
   border-style: dashed;
-  background: transparent;
+  background: var(--surface);
   color: var(--muted);
   font-size: 13px;
   font-weight: 550;
@@ -2538,6 +2572,30 @@ body.org-dragging .org-lane {
   color: var(--faint);
   font-size: 11.5px;
   margin-left: 24px;
+}
+/* One switch for the whole list (#58) — every group starts checked */
+.dup-all {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--muted);
+  padding: 2px 0 8px;
+}
+.dup-all input {
+  accent-color: var(--text);
+}
+/* What each copy carries (#58): size · capture time · marks · cuts */
+.dup-facts {
+  flex: none;
+  color: var(--faint);
+  font-size: 11.5px;
+}
+.dup-copy:focus-visible {
+  outline: 2px solid var(--tc);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 .sync-prog {
   display: flex;

@@ -122,9 +122,18 @@ pub fn review_playlist(cfg: &Config, trip: &str) -> Result<Playlist, String> {
             (p, r.id.as_str())
         })
         .collect();
+    // Per-master marks and cut counts ride on each clip for the organize
+    // board's cells (#58) — the player keeps its own live mark count instead.
+    let marks = read_marks(&dir);
+    let mut marks_n: HashMap<String, usize> = HashMap::new();
+    for m in &marks {
+        *marks_n.entry(m.master.clone()).or_default() += 1;
+    }
+    let cuts_n = crate::cut::cuts_by_master(&dir.join("clips"));
     let clips = masters
         .iter()
         .map(|m| {
+            let key = m.display().to_string();
             // Play a cached clean proxy if we've built one; never the raw native
             // proxy (its extra streams break the webview) or, ideally, a huge
             // master. `has_proxy` tells the UI a cheap source to build from is on
@@ -166,7 +175,7 @@ pub fn review_playlist(cfg: &Config, trip: &str) -> Result<Playlist, String> {
                 native.clone().unwrap_or_else(|| m.clone())
             };
             ReviewClip {
-                master: m.display().to_string(),
+                master: key.clone(),
                 play: play.display().to_string(),
                 name: m
                     .file_name()
@@ -186,6 +195,8 @@ pub fn review_playlist(cfg: &Config, trip: &str) -> Result<Playlist, String> {
                 photo,
                 person,
                 mine,
+                marks: marks_n.get(&key).copied().unwrap_or(0),
+                cuts: cuts_n.get(&key).copied().unwrap_or(0),
             }
         })
         .collect();
@@ -193,7 +204,7 @@ pub fn review_playlist(cfg: &Config, trip: &str) -> Result<Playlist, String> {
     Ok(Playlist {
         trip: trip.to_string(),
         clips,
-        marks: read_marks(&dir),
+        marks,
         last: st.last,
         watched: st.watched,
     })
@@ -257,6 +268,8 @@ pub fn card_playlist(cfg: &Config, window: Option<(i64, i64)>) -> Result<Playlis
                 // No provenance for card footage — it isn't in any trip yet.
                 person: String::new(),
                 mine: false,
+                marks: 0,
+                cuts: 0,
             }
         })
         .collect();

@@ -326,6 +326,30 @@ check("review: the end panel counts marks and clips", rev.markSummary([{ master:
 check("review: one mark reads singular", rev.markSummary([{ master: "a" }]), "1 mark in 1 clip");
 check("review: no marks say so", rev.markSummary([]), "End of the trip — nothing marked.");
 
+// Dedup (#58): the button names what the ticks would do, and the confirm names
+// the trips that lose what — the two sentences that make a prune decidable.
+const dedupCode = [
+  grab(/function dedupPruneTally\(groups, on\) \{[\s\S]*?\n\}/, "dedupPruneTally"),
+  grab(/function dedupConfirmBody\(resolutions\) \{[\s\S]*?\n\}/, "dedupConfirmBody"),
+].join("\n");
+const ddc = new Function("esc", `${dedupCode}; return { dedupPruneTally, dedupConfirmBody };`)((s) => s);
+const g1 = { key: "a", reclaimable: 100, copies: [{}, {}] };
+const g2 = { key: "b", reclaimable: 300, copies: [{}, {}, {}] };
+check("dedup: the button counts the copies pruned and the bytes freed", json(ddc.dedupPruneTally([g1, g2], { a: true, b: true })), json({ copies: 3, bytes: 400 }));
+check("dedup: unticked groups don't count", json(ddc.dedupPruneTally([g1, g2], { a: true, b: false })), json({ copies: 1, bytes: 100 }));
+const dbody = ddc.dedupConfirmBody([
+  {
+    keep: {},
+    remove: [
+      { trip: "kyoto", local: true, inCloud: true },
+      { trip: "iceland", local: true, inCloud: false },
+    ],
+  },
+  { keep: {}, remove: [{ trip: "kyoto", local: true, inCloud: false }] },
+]);
+check("dedup: the confirm counts per trip", dbody.includes("(2 in kyoto, 1 in iceland)"), true);
+check("dedup: and names the cloud copies", dbody.includes("1 cloud copy of your own footage"), true);
+
 // Deleting a trip must say what it erases and from where, and make you type the
 // name when the cloud holds the only copy (#52). An archived trip has no local
 // clips, and its confirm used to read "0 clips" over all of its footage. The

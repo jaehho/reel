@@ -309,6 +309,14 @@ pub struct DupCopy {
     /// Absolute local path when `local`, so the UI can preview it; `None` for a
     /// cloud-only copy.
     pub path: Option<String>,
+    /// Capture time (epoch seconds) when the copy is local — the tie-breaker for
+    /// "which of these is the original" (#58). 0 when unknown.
+    pub captured: i64,
+    /// Marks in this trip naming this master (#58) — pruned with the copy's file
+    /// unless they move, so the count is what the picker must weigh.
+    pub marks: usize,
+    /// Cut clips this copy has already produced (#58).
+    pub cuts: usize,
 }
 
 /// A set of copies that are the same clip (same basename + byte size) living in
@@ -879,6 +887,11 @@ pub struct ReviewClip {
     pub person: String,
     /// True when that person is you (`REEL_USER`); the badge reads "you".
     pub mine: bool,
+    /// Marks in this trip naming this master — what the organize board shows on
+    /// the cell (#58). The player keeps its own live count instead.
+    pub marks: usize,
+    /// Cut clips this master has already produced (#58).
+    pub cuts: usize,
 }
 
 /// A quick ffprobe verdict on whether a clip is worth loading. Lets the player

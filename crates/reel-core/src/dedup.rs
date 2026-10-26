@@ -19,7 +19,7 @@
 
 use crate::config::Config;
 use crate::ledger::Ledger;
-use crate::media::{fileid_of, has_ext, masters_in, rel_stem, under, CAPTURE_EXT};
+use crate::media::{captured_at, fileid_of, has_ext, masters_in, rel_stem, under, CAPTURE_EXT};
 use crate::model::{
     DupCopy, DupGroup, DupLoc, DupProgress, DupReport, DupResolution, DupResolveResult,
 };
@@ -176,6 +176,10 @@ pub fn scan(cfg: &Config) -> Result<DupReport, String> {
     }
 
     let user = cfg.user.as_str();
+    // Per-trip mark/cut counts for the picker (#58): what hangs on each copy
+    // before one of them is pruned. Built once per trip, lazily.
+    let mut marks_cache: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    let mut cuts_cache: HashMap<String, HashMap<String, usize>> = HashMap::new();
     let mut out: Vec<DupGroup> = Vec::new();
     let mut total_reclaimable = 0u64;
     for ((base, size), mut group) in groups {
@@ -183,9 +187,35 @@ pub fn scan(cfg: &Config) -> Result<DupReport, String> {
             continue;
         }
         group.sort_by(|a, b| a.trip.cmp(&b.trip).then_with(|| a.rel.cmp(&b.rel)));
-        let copies: Vec<DupCopy> = group
-            .iter()
-            .map(|l| DupCopy {
+        let mut copies: Vec<DupCopy> = Vec::with_capacity(group.len());
+        for l in &group {
+            let (captured, marks, cuts) = match l.path.as_deref() {
+                Some(p) => {
+                    let dir = cfg.lib.join(&l.trip);
+                    let key = p.display().to_string();
+                    let marks = marks_cache
+                        .entry(l.trip.clone())
+                        .or_insert_with(|| {
+                            let mut n: HashMap<String, usize> = HashMap::new();
+                            for m in crate::review::read_marks(&dir) {
+                                *n.entry(m.master).or_default() += 1;
+                            }
+                            n
+                        })
+                        .get(&key)
+                        .copied()
+                        .unwrap_or(0);
+                    let cuts = cuts_cache
+                        .entry(l.trip.clone())
+                        .or_insert_with(|| crate::cut::cuts_by_master(&dir.join("clips")))
+                        .get(&key)
+                        .copied()
+                        .unwrap_or(0);
+                    (captured_at(p), marks, cuts)
+                }
+                None => (0, 0, 0),
+            };
+            copies.push(DupCopy {
                 trip: l.trip.clone(),
                 person: person_of(&l.rel).to_string(),
                 rel: l.rel.clone(),
@@ -195,8 +225,11 @@ pub fn scan(cfg: &Config) -> Result<DupReport, String> {
                 in_cloud: l.in_cloud,
                 mine: person_of(&l.rel) == user,
                 path: l.path.as_ref().map(|p| p.display().to_string()),
-            })
-            .collect();
+                captured,
+                marks,
+                cuts,
+            });
+        }
         let suggested_keep = pick_canonical(&copies);
         let reclaimable = size * (copies.len() as u64 - 1);
         total_reclaimable += reclaimable;
