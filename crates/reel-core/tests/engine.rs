@@ -5397,3 +5397,86 @@ fn only_footage_kdenlive_cannot_open_gets_its_rate_conformed() {
     assert!(!conformed);
     assert_eq!(got.fps(), 30.0);
 }
+
+/// The review's watched set lives beside marks.tsv (#55): it counts on the card,
+/// and a trip fully on screen with no marks stops asking for Review.
+#[test]
+fn a_fully_watched_unmarked_trip_is_reviewed_not_imported() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    let trip = make_trip(&lib, "kyoto");
+    let a = trip.join("jaeho/dji/DJI_0001.MP4");
+    let b = trip.join("jaeho/dji/DJI_0002.MP4");
+    touch(&a, 1, 1000, 1_700_000_000);
+    touch(&b, 1, 1000, 1_700_000_010);
+    let c = cfg(&lib, &state, None);
+
+    let t = &list_trips(&c)[0];
+    assert_eq!(t.state, TripState::Imported);
+    assert_eq!(t.next, "review");
+    assert_eq!(t.watched, 0);
+
+    // one clip on screen — the review is still in progress
+    reel_core::save_review_state(&c, "kyoto", None, vec![a.display().to_string()]).unwrap();
+    let t = &list_trips(&c)[0];
+    assert_eq!(t.state, TripState::Imported);
+    assert_eq!(t.watched, 1);
+
+    // both on screen and none marked: done (#55), no more "Review →"
+    reel_core::save_review_state(
+        &c,
+        "kyoto",
+        Some(b.display().to_string()),
+        vec![a.display().to_string(), b.display().to_string()],
+    )
+    .unwrap();
+    let t = &list_trips(&c)[0];
+    assert_eq!(t.state, TripState::Reviewed);
+    assert_eq!(t.next, "done");
+    assert_eq!(t.watched, 2);
+
+    // marks put it back in the editing lane — Marked outranks Reviewed
+    fs::write(trip.join("marks.tsv"), "m1\t0.000\t1.000\thl\n").unwrap();
+    let t = &list_trips(&c)[0];
+    assert_eq!(t.state, TripState::Marked);
+}
+
+/// reviewed.tsv round-trips through the playlist (#55): resume point and watched
+/// set come back on the next open, and a missing file means start from the top.
+#[test]
+fn review_state_round_trips_and_resumes_the_last_clip() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Videos");
+    let state = d.path().join("state");
+    let trip = make_trip(&lib, "kyoto");
+    let a = trip.join("jaeho/dji/DJI_0001.MP4");
+    touch(&a, 1, 1000, 1_700_000_000);
+    let c = cfg(&lib, &state, None);
+
+    let master = a.display().to_string();
+    reel_core::save_review_state(&c, "kyoto", Some(master.clone()), vec![master.clone()]).unwrap();
+    let pl = reel_core::review_playlist(&c, "kyoto").unwrap();
+    assert_eq!(pl.last.as_deref(), Some(master.as_str()));
+    assert_eq!(pl.watched, vec![master]);
+    // a repeated watched row is one entry, not two
+    reel_core::save_review_state(
+        &c,
+        "kyoto",
+        None,
+        vec![a.display().to_string(), a.display().to_string()],
+    )
+    .unwrap();
+    assert_eq!(
+        reel_core::review_playlist(&c, "kyoto")
+            .unwrap()
+            .watched
+            .len(),
+        1
+    );
+    // no reviewed.tsv → resume at the first clip
+    fs::remove_file(trip.join("reviewed.tsv")).unwrap();
+    let pl = reel_core::review_playlist(&c, "kyoto").unwrap();
+    assert_eq!(pl.last, None);
+    assert!(pl.watched.is_empty());
+}

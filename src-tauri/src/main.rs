@@ -157,6 +157,7 @@ fn main() {
             commands::commit_archive,
             commands::review_playlist,
             commands::save_marks,
+            commands::save_review_state,
             commands::card_playlist,
             commands::make_proxy,
             commands::make_card_proxy,

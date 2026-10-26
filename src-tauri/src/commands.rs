@@ -365,6 +365,25 @@ pub async fn reveal_path(path: String) -> Result<(), String> {
     }
 }
 
+/// Persist the review's watched set and resume point (#55) — which masters have
+/// been on screen and the one that was showing when the player closed.
+#[tauri::command]
+pub async fn save_review_state(
+    trip: String,
+    last: Option<String>,
+    watched: Vec<String>,
+) -> Result<(), String> {
+    let cfg = Config::from_env();
+    match tauri::async_runtime::spawn_blocking(move || {
+        reel_core::save_review_state(&cfg, &trip, last, watched)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(join) => Err(format!("review-state task failed: {join}")),
+    }
+}
+
 /// Probe a clip's playability (one ffprobe over headers) so the UI can flag an
 /// empty, too-brief, or corrupt clip up front rather than waiting out a doomed
 /// load. Runs off the UI thread; on any task failure it reports healthy so a

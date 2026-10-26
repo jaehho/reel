@@ -189,10 +189,13 @@ pub fn review_playlist(cfg: &Config, trip: &str) -> Result<Playlist, String> {
             }
         })
         .collect();
+    let st = read_review_state(&dir);
     Ok(Playlist {
         trip: trip.to_string(),
         clips,
         marks: read_marks(&dir),
+        last: st.last,
+        watched: st.watched,
     })
 }
 
@@ -261,6 +264,9 @@ pub fn card_playlist(cfg: &Config, window: Option<(i64, i64)>) -> Result<Playlis
         trip: "card".to_string(),
         clips,
         marks: Vec::new(),
+        // No review bookkeeping for card footage — it isn't in a trip yet.
+        last: None,
+        watched: Vec::new(),
     })
 }
 
@@ -272,4 +278,71 @@ pub fn save_marks(cfg: &Config, trip: &str, marks: Vec<Mark>) -> Result<usize, S
     let n = marks.len();
     update_marks(&dir, |cur| *cur = marks).map_err(|e| format!("couldn't write marks: {e}"))?;
     Ok(n)
+}
+
+/// What the review has covered so far (#55): the master that was on screen when
+/// the player closed, and every master that has been on screen. Stored beside
+/// `marks.tsv` as `reviewed.tsv` — same TSV shape, so it greps and hand-edits
+/// like the marks file, and a bad line is skipped rather than fatal.
+#[derive(Default, Clone, Debug, PartialEq)]
+pub struct ReviewState {
+    pub last: Option<String>,
+    pub watched: Vec<String>,
+}
+
+pub fn read_review_state(dir: &Path) -> ReviewState {
+    let mut st = ReviewState::default();
+    let Ok(text) = std::fs::read_to_string(dir.join("reviewed.tsv")) else {
+        return st;
+    };
+    for line in text.lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut it = line.splitn(2, '\t');
+        let (kind, val) = match (it.next(), it.next()) {
+            (Some(k), Some(v)) => (k, v),
+            _ => continue,
+        };
+        match kind {
+            "last" => st.last = Some(val.to_string()),
+            "watched" => {
+                if !st.watched.iter().any(|w| w == val) {
+                    st.watched.push(val.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    st
+}
+
+/// Rewrite `reviewed.tsv` atomically (temp sibling + rename), like `write_marks`.
+pub fn write_review_state(dir: &Path, st: &ReviewState) -> std::io::Result<()> {
+    let mut body = String::new();
+    if let Some(last) = &st.last {
+        body.push_str(&format!("last\t{last}\n"));
+    }
+    for w in &st.watched {
+        body.push_str(&format!("watched\t{w}\n"));
+    }
+    let out = dir.join("reviewed.tsv");
+    let tmp = crate::store::temp_sibling(&out);
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, &out).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// Persist the review's watched set and resume point (#55). Master paths are
+/// trusted as the UI got them from `review_playlist`.
+pub fn save_review_state(
+    cfg: &Config,
+    trip: &str,
+    last: Option<String>,
+    watched: Vec<String>,
+) -> Result<(), String> {
+    let dir = trip_dir(cfg, trip)?;
+    write_review_state(&dir, &ReviewState { last, watched })
+        .map_err(|e| format!("couldn't write review state: {e}"))
 }

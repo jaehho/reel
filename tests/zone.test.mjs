@@ -308,6 +308,24 @@ check("import: else the last trip used", impApi("mu-cang-chai").importDefaultNam
 check("import: else the capture date", i0.importDefaultName([{ start: 5, owners: [] }]), "day-5");
 check("import: two owners are not one destination", impApi("last").importDefaultName([{ start: 5, owners: ["a"] }, { start: 9, owners: ["b"] }]), "last");
 
+// Review resume (#55): reopening starts at the master that was on screen, not
+// clip 1, and the end panel names what the review came to.
+const revCode = [
+  grab(/function resumeIndex\(clips, last, fallback\) \{[\s\S]*?\n\}/, "resumeIndex"),
+  grab(/function markSummary\(marks\) \{[\s\S]*?\n\}/, "markSummary"),
+].join("\n");
+const rev = new Function(
+  "plural",
+  `${revCode}; return { resumeIndex, markSummary };`
+)((n, w) => `${n} ${w}${n === 1 ? "" : "s"}`);
+const clips = [{ master: "a" }, { master: "b" }, { master: "c" }];
+check("review: reopening resumes the master left on screen", rev.resumeIndex(clips, "b", 0), 1);
+check("review: an unremembered master falls back", rev.resumeIndex(clips, "gone", 2), 2);
+check("review: a first open starts at the fallback", rev.resumeIndex(clips, null, 0), 0);
+check("review: the end panel counts marks and clips", rev.markSummary([{ master: "a" }, { master: "a" }, { master: "b" }]), "3 marks in 2 clips");
+check("review: one mark reads singular", rev.markSummary([{ master: "a" }]), "1 mark in 1 clip");
+check("review: no marks say so", rev.markSummary([]), "End of the trip — nothing marked.");
+
 // Deleting a trip must say what it erases and from where, and make you type the
 // name when the cloud holds the only copy (#52). An archived trip has no local
 // clips, and its confirm used to read "0 clips" over all of its footage. The

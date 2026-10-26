@@ -145,7 +145,13 @@ fn archived_flag(dir: &Path) -> bool {
     )
 }
 
-fn derive_state(archived: bool, masters: usize, marks: usize, clips: usize) -> TripState {
+fn derive_state(
+    archived: bool,
+    masters: usize,
+    marks: usize,
+    clips: usize,
+    watched: usize,
+) -> TripState {
     // The marker wins, but only while the raw is actually gone: bringing footage
     // back clears it (see `restore`), and a stale marker on a trip that has masters
     // again would otherwise keep it filed away with no way to reach it.
@@ -162,6 +168,10 @@ fn derive_state(archived: bool, masters: usize, marks: usize, clips: usize) -> T
         (0, _, c) if c > 0 => TripState::Archived,
         (0, _, _) => TripState::Empty,
         (_, m, _) if m > 0 => TripState::Marked,
+        // Every clip has been on screen and none was marked: the review is
+        // finished (#55). Marked outranks it — a trip with marks is still asking
+        // to be edited, however much of it you've seen.
+        (_, _, _) if watched >= masters => TripState::Reviewed,
         _ => TripState::Imported,
     }
 }
@@ -235,7 +245,14 @@ fn build_trip(cfg: &Config, dir: &Path, ledger: &Ledger) -> Trip {
     let masters = masters_v.len();
     let marks = count_marks(&dir.join("marks.tsv"));
     let clips = count_clips(&dir.join("clips"));
-    let state = derive_state(archived_flag(dir), masters, marks, clips);
+    // How much of the trip has been on screen (reviewed.tsv, see review.rs) —
+    // drives the card's "34 / 58 reviewed" and the Reviewed state (#55).
+    let review = crate::review::read_review_state(dir);
+    let watched = masters_v
+        .iter()
+        .filter(|m| review.watched.iter().any(|w| Path::new(w) == m.as_path()))
+        .count();
+    let state = derive_state(archived_flag(dir), masters, marks, clips, watched);
     // Provenance: yours (under `<trip>/<you>/`) vs. footage pulled from others.
     let mut mine = 0usize;
     let mut contributors: Vec<String> = Vec::new();
@@ -286,6 +303,7 @@ fn build_trip(cfg: &Config, dir: &Path, ledger: &Ledger) -> Trip {
         masters,
         marks,
         clips,
+        watched,
         bytes: dir_bytes(dir),
         from: trip_meta(dir, "from"),
         to: trip_meta(dir, "to"),

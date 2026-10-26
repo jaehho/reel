@@ -702,15 +702,21 @@ function footActions(t, card) {
   // `t.next` used to say "cut" for a marked trip, so this had to override it to
   // reach Edit. The engine says "edit" now — cutting stopped being a stage there
   // too — and the override is gone with it.
-  const next = el("button", "btn small primary", NEXT_LABEL[t.next] ?? t.next);
-  next.type = "button";
-  next.onclick =
-    t.next === "review"
-      ? () => openReview(t)
-      : t.next === "edit"
-        ? () => openInEditor(t)
-        : () => toast(`"${t.next}" for ${t.name} is coming in a later build.`);
-  actions.append(next);
+  // A "done" trip (fully reviewed, nothing marked — #55) asks for nothing:
+  // a quiet ✓ where the button would be, not another "Review →".
+  if (t.next === "done") {
+    actions.append(el("span", "trip-done", "✓ Reviewed"));
+  } else {
+    const next = el("button", "btn small primary", NEXT_LABEL[t.next] ?? t.next);
+    next.type = "button";
+    next.onclick =
+      t.next === "review"
+        ? () => openReview(t)
+        : t.next === "edit"
+          ? () => openInEditor(t)
+          : () => toast(`"${t.next}" for ${t.name} is coming in a later build.`);
+    actions.append(next);
+  }
   return [el("div", "trip-size tnum", fmtBytes(t.bytes)), actions];
 }
 
@@ -824,6 +830,10 @@ function tripCard(t) {
     elHTML("div", null, `<span class="n">${t.marks}</span> marks`),
     elHTML("div", null, `<span class="n">${t.clips}</span> cut`)
   );
+  // How far through the footage you are (#55) — only once it's more than zero,
+  // so an untouched trip keeps its three quiet stats.
+  if (t.watched > 0)
+    stats.append(elHTML("div", null, `<span class="n">${t.watched}</span> / ${t.masters} reviewed`));
 
   const foot = el("div", "trip-foot");
   foot.append(...footActions(t, card));
@@ -1834,6 +1844,10 @@ const P = {
   zoneMark: null, // index into P.marks, so a running loop can be retrimmed by i/o
   zoneFree: false, // wrap paused: seeked out of the loop, or parked on an edge
   zoneEdge: null, // 0/1 while parked on that edge of the mark, else null
+  watched: new Set(), // masters on screen this trip — the filmstrip tint (#55)
+  reviewLast: null, // master on screen now — where the next review resumes
+  reviewDirty: false, // watched/resume changed since the last reviewed.tsv write
+  reviewT: null, // debounce timer for that write
 };
 
 function clipUrl(path) {
@@ -1896,6 +1910,11 @@ async function openReview(t) {
     pendingIn: null,
     seekAfterLoad: null,
   });
+  // Resume where the last session left off, with the tint of what has already
+  // been on screen — both from reviewed.tsv, carried on the playlist (#55).
+  P.watched = new Set(pl.watched || []);
+  P.reviewLast = null;
+  P.reviewDirty = false;
   const player = $("#player");
   player.classList.remove("preview");
   player.style.setProperty("--tc", tripColor(t.name));
@@ -1906,7 +1925,7 @@ async function openReview(t) {
   renderMarks();
   renderFilmstrip();
   logf("info", `review opened: ${t.name}`, { clips: pl.clips.length, marks: P.marks.length });
-  loadClip(firstPlayable(), null, 1);
+  loadClip(resumeIndex(P.clips, pl.last, firstPlayable()), null, 1);
 }
 
 // Open the player read-only on the inserted card, optionally scoped to one
@@ -1941,6 +1960,10 @@ async function openCardPreview(win, label) {
     pendingIn: null,
     seekAfterLoad: null,
   });
+  // No review bookkeeping on the card — it isn't a trip (pl.last is null here).
+  P.watched = new Set(pl.watched || []);
+  P.reviewLast = null;
+  P.reviewDirty = false;
   const player = $("#player");
   player.classList.add("preview");
   player.style.setProperty("--tc", "#8a8f98"); // neutral — the card isn't a trip
@@ -1950,7 +1973,7 @@ async function openCardPreview(win, label) {
   setPlayIcon(false);
   renderMarks();
   renderFilmstrip();
-  loadClip(firstPlayable(), null, 1);
+  loadClip(resumeIndex(P.clips, pl.last, firstPlayable()), null, 1);
 }
 
 // Index of the next clip that can actually play from `from` in direction `dir`
@@ -1965,13 +1988,50 @@ function firstPlayable() {
   const i = nextPlayable(0, 1);
   return i < 0 ? 0 : i; // all stubs → land on 0 and show the empty note
 }
+// Where a reopened review starts (#55): the master that was on screen when it
+// last closed, else the first playable clip. Keyed by master, because clip
+// numbers shift as stills join the strip and stubs drop out.
+function resumeIndex(clips, last, fallback) {
+  if (last) {
+    const i = clips.findIndex((c) => c.master === last);
+    if (i >= 0) return i;
+  }
+  return fallback;
+}
+
+// A clip counts as reviewed once it has been on screen (#55) — the filmstrip
+// tint and the card's "34 / 58 reviewed". The set is flushed to reviewed.tsv
+// (debounced, and on close) so the next review resumes with the same picture.
+function markWatched(i) {
+  const c = P.clips[i];
+  if (!c) return;
+  P.reviewLast = c.master;
+  if (P.watched.has(c.master)) return;
+  P.watched.add(c.master);
+  P.reviewDirty = true;
+  clearTimeout(P.reviewT);
+  P.reviewT = setTimeout(saveReview, 400);
+}
+function saveReview() {
+  clearTimeout(P.reviewT);
+  if (P.preview || !P.trip || !P.reviewDirty) return;
+  P.reviewDirty = false;
+  invoke("save_review_state", {
+    trip: P.trip,
+    last: P.reviewLast || null,
+    watched: [...P.watched],
+  }).catch((e) => toast(String(e), { kind: "error" }));
+}
 
 function closeReview() {
   if (!P.open) return;
+  const from = P.trip;
+  const preview = P.preview;
   if (P.saveT) {
     clearTimeout(P.saveT);
     saveMarks(); // flush any pending label edit
   }
+  saveReview(); // flush the watched set / resume point (#55)
   P.open = false;
   P.preview = false;
   clearTimeout(P.loadT);
@@ -1990,7 +2050,11 @@ function closeReview() {
   player.hidden = true;
   player.classList.remove("preview", "photo");
   document.body.classList.remove("reviewing");
-  load(); // dashboard mark counts may have changed
+  // Dashboard counts may have changed — and land on the trip just reviewed, so
+  // Esc doesn't dump you in an alphabetical grid with no idea where you were (#55).
+  load().finally(() => {
+    if (!preview && from) landOnTrip(from);
+  });
 }
 
 // ---- clip loading ----
@@ -2000,6 +2064,7 @@ function closeReview() {
 async function loadClip(i, seekTo = null, dir = 0) {
   if (i < 0 || i >= P.clips.length) return;
   P.i = i;
+  markWatched(i); // on screen = reviewed (#55)
   resetZoom(); // every clip starts fit-to-stage
   P.pendingIn = null;
   hidePending();
@@ -2859,6 +2924,11 @@ function renderMarks() {
   // The count rides on the button that opens them — one control, not a readout
   // sitting beside a button that says the same thing.
   $("#player-list").textContent = P.marks.length ? `Marks · ${P.marks.length}` : "Marks";
+  // Cut and Edit do nothing without marks, and a card preview has no trip to
+  // write to (#55) — dim them rather than let the engine say why.
+  const canAct = P.marks.length > 0 && !P.preview;
+  $("#marks-cut").disabled = !canAct;
+  $("#marks-edit").disabled = !canAct;
   P.marks.forEach((m, idx) => {
     const ci = P.clips.findIndex((c) => c.master === m.master);
     const row = el("div", `mark-row${idx === P.selected ? " sel" : ""}`);
@@ -2947,6 +3017,9 @@ function updateFilmstripActive() {
   for (const cell of strip.children) {
     const idx = +cell.dataset.idx;
     cell.classList.toggle("active", idx === P.i);
+    // Watched = has been on screen this trip (#55); the tint marks the trail
+    // through a long filmstrip so a resumed review shows where you were.
+    cell.classList.toggle("watched", P.watched.has(P.clips[idx].master));
     const n = P.marks.filter((m) => m.master === P.clips[idx].master).length;
     const badge = cell.querySelector(".film-marks");
     badge.hidden = n === 0;
@@ -3073,6 +3146,16 @@ function toggleMarksPanel() {
 // ---- wiring ----
 $("#player-back").addEventListener("click", closeReview);
 $("#player-list").addEventListener("click", toggleMarksPanel);
+// The Marks panel's own Cut and Edit (#55) — the panel text used to describe
+// them and leave you to Esc out to the trip card to find either one.
+$("#marks-cut").addEventListener("click", () => {
+  if (P.preview || !P.trip) return;
+  startCut({ name: P.trip });
+});
+$("#marks-edit").addEventListener("click", () => {
+  if (P.preview || !P.trip) return;
+  openInEditor({ name: P.trip });
+});
 
 // ---- the keys panel (?) ----
 // Holds everything the hint bar no longer shows, plus what a mark actually is.
@@ -3129,7 +3212,44 @@ video.addEventListener("ended", () => {
   hidePending();
   armPending(false);
   setPlayIcon(false);
+  if (!P.preview) showReviewEnd();
 });
+
+// "12 marks in 7 clips" — what the review came to (#55).
+function markSummary(marks) {
+  const clips = new Set(marks.map((m) => m.master)).size;
+  return marks.length
+    ? `${plural(marks.length, "mark")} in ${plural(clips, "clip")}`
+    : "End of the trip — nothing marked.";
+}
+
+// The end of the road (#55): say what came of the review and name the next
+// steps, instead of stopping on the last frame with Esc as the only way out.
+function showReviewEnd() {
+  const marks = P.marks.length;
+  const o = $("#stage-over");
+  o.hidden = false;
+  o.className = "stage-over end";
+  o.innerHTML = "";
+  o.append(el("div", "stage-msg", markSummary(P.marks)));
+  const row = el("div", "stage-actions");
+  if (marks) {
+    const cut = el("button", "btn small ghost", "Cut");
+    cut.type = "button";
+    cut.title = "Write each mark out as its own file (the trip's clips/)";
+    cut.onclick = () => startCut({ name: P.trip });
+    const edit = el("button", "btn small primary", "Edit");
+    edit.type = "button";
+    edit.title = "Open the marks as a Kdenlive timeline";
+    edit.onclick = () => openInEditor({ name: P.trip });
+    row.append(cut, edit);
+  }
+  const back = el("button", "btn small ghost", "Back to trips");
+  back.type = "button";
+  back.onclick = () => closeReview();
+  row.append(back);
+  o.append(row);
+}
 video.addEventListener("error", onVideoError);
 video.addEventListener("playing", stopLoading);
 video.addEventListener("canplay", stopLoading);

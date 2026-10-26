@@ -20,6 +20,9 @@ pub enum TripState {
     Empty,
     /// Footage imported, not reviewed.
     Imported,
+    /// Every clip has been on screen and nothing was marked — the review
+    /// finished without edits (#55). The card stops asking for another one.
+    Reviewed,
     /// Reviewed: has marks, ready to edit or cut.
     Marked,
     /// Raw freed locally, kept in the cloud.
@@ -27,11 +30,13 @@ pub enum TripState {
 }
 
 impl TripState {
-    /// One-word next action the UI turns into a button.
+    /// One-word next action the UI turns into a button. `done` is the no-step
+    /// sentinel: nothing is being asked of this trip right now.
     pub fn next(self) -> &'static str {
         match self {
             TripState::Empty => "import",
             TripState::Imported => "review",
+            TripState::Reviewed => "done",
             TripState::Marked => "edit",
             // Nothing here to work on until the raw is back, and every other
             // action on an archived trip is a lie (see `footActions`).
@@ -69,6 +74,9 @@ pub struct Trip {
     pub masters: usize,
     pub marks: usize,
     pub clips: usize,
+    /// Masters that have been on screen at least once — the review's watched
+    /// count, out of `masters` (#55).
+    pub watched: usize,
     pub bytes: u64,
     /// Capture window from `.reel` (`YYYY-MM-DD`), if set.
     pub from: Option<String>,
@@ -853,4 +861,10 @@ pub struct Playlist {
     pub trip: String,
     pub clips: Vec<ReviewClip>,
     pub marks: Vec<Mark>,
+    /// The master that was on screen when the player last closed this trip —
+    /// where the next review resumes (#55). `None` on a first open.
+    pub last: Option<String>,
+    /// Masters that have been on screen, in first-watched order — the filmstrip
+    /// tint and the "34 / 58 reviewed" count (#55).
+    pub watched: Vec<String>,
 }

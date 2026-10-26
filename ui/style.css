@@ -730,6 +730,13 @@ main {
   align-items: center;
   gap: 8px;
 }
+/* A fully reviewed, unmarked trip asks for nothing (#55) */
+.trip-done {
+  color: var(--safe);
+  font-size: 12.5px;
+  font-weight: 650;
+  padding: 6px 4px;
+}
 
 /* ---- share (push to cloud): inline progress on the trip card ---- */
 .share-prog {
@@ -1387,6 +1394,16 @@ body.reviewing {
   max-width: 56ch;
   line-height: 1.5;
 }
+/* The end-of-review panel (#55): a summary of what came of it, plus next steps */
+.stage-over.end {
+  background: color-mix(in oklab, var(--bg) 62%, transparent);
+}
+.stage-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
 /* Shuttle speed (J/K/L). Sits over the picture rather than in the chrome, so the
    speed reads where the eye already is. Only present off normal playback, so its
    absence means 1× forward — nothing to dismiss, nothing to parse. */
@@ -1531,6 +1548,17 @@ body.reviewing {
   color: var(--faint);
   font-size: 12.5px;
   line-height: 1.65;
+}
+/* Cut and Edit live here now (#55) — the panel used to only describe them. */
+.marks-foot {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line-soft);
+}
+.marks-foot .btn {
+  flex: 1;
+  justify-content: center;
 }
 /* an inline key in prose — the marks panel's empty note and the keys panel */
 .marks-empty kbd,
@@ -1804,6 +1832,14 @@ body.reviewing {
 }
 .film.active {
   border-color: var(--tc);
+}
+/* Watched = has been on screen (#55). The thumb dims a step so the trail
+   through a long strip reads at a glance; the active cell stays bright. */
+.film.watched .film-thumb {
+  opacity: 0.55;
+}
+.film.watched.active .film-thumb {
+  opacity: 1;
 }
 .film.stub {
   opacity: 0.55;
