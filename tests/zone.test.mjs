@@ -145,6 +145,75 @@ check("a renamed mark is not a highlight", touch([hl(4, 14, { label: "waterfall"
 check("an i/o mark is not a highlight", touch([hl(4, 14, { label: "" })], 5, 15), -1);
 check("the latest overlapping highlight wins", touch([hl(0, 10), hl(5, 15)], 8, 12), 1);
 
+// Ctrl+Space names a zone from the selection or the mark under the playhead —
+// never the clip's last mark (#10). That fallback armed a zone nobody asked
+// for: one keypress yanked the playhead to whatever was marked last.
+const zoneCode = grab(/function currentZone\(\) \{[\s\S]*?\n\}/, "currentZone");
+const zoneOf = (marks, t, selected = null) => {
+  const stubs = {
+    P: { marks, selected },
+    curClip: () => ({ master: "a.mp4" }),
+    video: { currentTime: t },
+  };
+  const names = Object.keys(stubs);
+  const currentZone = new Function(...names, `${zoneCode}; return currentZone;`)(...names.map((k) => stubs[k]));
+  return currentZone();
+};
+const a = hl(0, 4),
+  b = hl(8, 12);
+check("zone: the selected mark wins", zoneOf([a, b], 2, 1), b);
+check("zone: a mark under the playhead", zoneOf([a, b], 9, null), b);
+check("zone: selection on another clip still names it", zoneOf([a, b], 5, 1), b);
+check("zone: no mark here is not the clip's last mark", zoneOf([a, b], 5, null), null);
+check("zone: an unmarked clip has no zone", zoneOf([], 5, null), null);
+
+// `i` renders the readout; it never seeks or pauses (#10). The wrap used to
+// live in updateTime, so markIn's render call could move the playhead — seen
+// when a loop zone's mark had gone stale (zoneMark past an undo'd marks array),
+// trimLoop declined, and `i` past the zone's end wrapped the picture away.
+const liveCode = [grab(/function markReady\(\) \{[\s\S]*?\n\}/, "markReady"), grab(/function markIn\(\) \{[\s\S]*?\n\}/, "markIn"), grab(/function updateTime\(\) \{[\s\S]*?\n\}/, "updateTime")].join("\n");
+const pressI = (zone) => {
+  const seen = { seeks: 0, pauses: 0, clears: 0, toasts: 0 };
+  let t = 20;
+  const video = {
+    duration: 30,
+    get currentTime() {
+      return t;
+    },
+    set currentTime(v) {
+      seen.seeks++;
+      t = v;
+    },
+    pause() {
+      seen.pauses++;
+    },
+  };
+  const stubs = {
+    P: { pendingIn: null, zoneLoop: false, zoneMark: null, zoneStart: 3, zoneEnd: 11, zoneFree: false, marks: [], ...zone },
+    video,
+    $: () => ({ textContent: "", style: {}, hidden: false }),
+    fmtTime: (x) => String(x),
+    toast: () => seen.toasts++,
+    curClip: () => ({ master: "a.mp4" }),
+    videoReady: () => true,
+    armPending: () => {},
+    trimLoop: () => false, // a stale zoneMark: the mark it named is gone
+    clearZone: () => seen.clears++,
+  };
+  const names = Object.keys(stubs);
+  const { markIn } = new Function(...names, `${liveCode}; return { markIn };`)(...names.map((k) => stubs[k]));
+  markIn();
+  return { seen, P: stubs.P };
+};
+let p = pressI({ zoneLoop: true });
+check("i past the loop zone's end seeks nothing", p.seen.seeks, 0);
+check("...pauses nothing", p.seen.pauses, 0);
+check("...clears no zone", p.seen.clears, 0);
+check("...and still arms the mark at the playhead", p.P.pendingIn, 20);
+p = pressI({});
+check("i past a one-shot zone's end seeks nothing", p.seen.seeks, 0);
+check("...and pauses nothing", p.seen.pauses, 0);
+
 // Deleting a trip must say what it erases and from where, and make you type the
 // name when the cloud holds the only copy (#52). An archived trip has no local
 // clips, and its confirm used to read "0 clips" over all of its footage. The

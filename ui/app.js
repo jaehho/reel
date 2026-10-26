@@ -2166,15 +2166,17 @@ async function grabStill() {
 }
 
 // ---- zone (Ctrl+Space play / Ctrl+Shift+Space loop): review one segment ----
-// The "zone" is the selected mark, else a mark under the playhead on this clip,
-// else the clip's last mark — mirroring Kdenlive's Play/Loop Zone on the in/out.
+// The "zone" is the selected mark, else a mark under the playhead on this clip —
+// never a mark the user did not just name or sit in. Falling back to the clip's
+// last mark armed zones nobody asked for: Ctrl+Space yanked the playhead to
+// whatever was marked last, even across the clip (#10).
 function currentZone() {
   if (P.selected != null && P.marks[P.selected]) return P.marks[P.selected];
   const c = curClip();
   if (!c) return null;
   const t = video.currentTime || 0;
   const here = P.marks.filter((m) => m.master === c.master);
-  return here.find((m) => t >= m.start && t <= m.end) || here[here.length - 1] || null;
+  return here.find((m) => t >= m.start && t <= m.end) || null;
 }
 // A zone on another clip has to wait for that clip to become playable, so it arms
 // a one-shot `canplay`. If the clip never gets there — a stub, a photo, a proxy
@@ -2382,11 +2384,12 @@ function zoneAction(t, z) {
   return z.zoneLoop ? "wrap" : "stop";
 }
 
-function updateTime() {
-  const d = video.duration || 0,
-    t = video.currentTime || 0;
-  // zone play/loop: stop (or loop back) when the playhead reaches the zone's end
-  switch (zoneAction(t, P)) {
+// The wrap/stop a running zone owes at the current playhead. This is playback
+// behaviour, not rendering: it used to live inside updateTime(), so every render
+// call could seek as a side effect — markIn's included, which moved the playhead
+// when `i` landed past the zone's end (#10). Only the timeupdate tick runs it.
+function zoneTick() {
+  switch (zoneAction(video.currentTime || 0, P)) {
     case "wrap":
       video.currentTime = P.zoneStart;
       break;
@@ -2395,6 +2398,13 @@ function updateTime() {
       clearZone();
       break;
   }
+}
+
+// Render only — no seeking, no pausing. Anything that moves the picture does so
+// on purpose (zoneTick, seekFromEvent, nudge…), never by drawing the readout.
+function updateTime() {
+  const d = video.duration || 0,
+    t = video.currentTime || 0;
   $("#time").textContent = `${fmtTime(t)} / ${fmtTime(d)}`;
   const f = d ? t / d : 0;
   $("#scrub-played").style.transform = `scaleX(${f})`;
@@ -2889,7 +2899,12 @@ keysDlg.addEventListener("click", (e) => {
 $("#player-proxy").addEventListener("click", () => {
   const c = curClip();
   if (!c) return;
-  const at = video.currentTime || null;
+  // loadClip's bookkeeping, which this swap used to skip (#10): read the
+  // playhead only from the clip on screen, and drop any zone and shuttle before
+  // the source changes under them.
+  const at = videoReady() ? video.currentTime || null : null;
+  stopShuttle();
+  clearZone();
   if (!c.proxied) return prepareThenPlay(c, at); // nothing to switch to yet — build it
   c.showMaster = !c.showMaster;
   updateProxyTag();
@@ -2900,6 +2915,7 @@ $("#play").addEventListener("click", togglePlay);
 video.addEventListener("click", togglePlay);
 video.addEventListener("loadedmetadata", onMeta);
 video.addEventListener("timeupdate", () => {
+  zoneTick();
   updateTime();
   // A timeupdate means the playhead actually moved, so we're progressing — even
   // during a fast shuttle or reverse scrub, where readyState routinely dips and
@@ -2914,7 +2930,17 @@ video.addEventListener("ended", () => {
   // reset it, so the rate (and its readout) would stick around on a stopped picture.
   stopShuttle();
   const next = nextPlayable(P.i + 1, 1);
-  if (next >= 0) loadClip(next, null, 1);
+  if (next >= 0) return loadClip(next, null, 1);
+  // No next playable clip — the trip's end, or a tail of stubs (nextPlayable
+  // returns -1 when everything left is a stub, so this also lands mid-trip).
+  // loadClip would have reset these on the way to the next clip; with no next
+  // clip, reset here so a stale zone, pending mark or rate can't arm the
+  // stopped picture (#10).
+  clearZone();
+  P.pendingIn = null;
+  hidePending();
+  armPending(false);
+  setPlayIcon(false);
 });
 video.addEventListener("error", onVideoError);
 video.addEventListener("playing", stopLoading);
