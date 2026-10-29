@@ -33,6 +33,7 @@ make logs     # follow the app log
 make errors   # just the warnings and errors from it
 make build    # optimized release binary -> target/release/reel
 make lint     # clippy with warnings as errors, then cargo fmt --check
+make package  # the Arch package of the pushed main, into packaging/
 make help     # every target
 ```
 

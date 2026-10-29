@@ -2,7 +2,7 @@
 # The frontend is static and embedded at compile time, so `cargo run` is all you
 # need to launch the app; npm/tauri-cli only come in for release bundling.
 
-.PHONY: help run test test-live lint build install uninstall fmt clean dump logs errors perf reproxy
+.PHONY: help run test test-live lint build install uninstall package fmt clean dump logs errors perf reproxy
 
 PREFIX  ?= $(HOME)/.local
 DATADIR ?= $(or $(XDG_DATA_HOME),$(HOME)/.local/share)
@@ -72,6 +72,18 @@ uninstall: ## remove the user install (footage, config and logs stay)
 	      $(DATADIR)/icons/hicolor/128x128/apps/reel.png \
 	      $(DATADIR)/icons/hicolor/32x32/apps/reel.png
 	update-desktop-database $(DATADIR)/applications 2>/dev/null || true
+
+package: ## build the Arch package into packaging/ (in a scratch copy)
+	# makepkg writes the pkgver() result back into whatever recipe it
+	# runs (battery-log gotcha #7), so it gets a throwaway copy of the
+	# PKGBUILD and only the finished package moves back into packaging/.
+	# The recipe builds the pushed main from GitHub, not this tree.
+	tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	cp packaging/PKGBUILD "$$tmp/"; \
+	(cd "$$tmp" && makepkg -f) && \
+	mv "$$tmp"/*.pkg.tar.zst packaging/ && \
+	ls -1t packaging/*.pkg.tar.zst | head -1
 
 fmt:
 	cargo fmt
