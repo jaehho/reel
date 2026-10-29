@@ -319,11 +319,7 @@ pub fn read_review_state(dir: &Path) -> ReviewState {
         };
         match kind {
             "last" => st.last = Some(val.to_string()),
-            "watched" => {
-                if !st.watched.iter().any(|w| w == val) {
-                    st.watched.push(val.to_string());
-                }
-            }
+            "watched" if !st.watched.iter().any(|w| w == val) => st.watched.push(val.to_string()),
             _ => {}
         }
     }

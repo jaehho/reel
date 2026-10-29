@@ -414,7 +414,7 @@ pub fn cut_trip(
             Ok(o) => {
                 let err = String::from_utf8_lossy(&o.stderr);
                 if let Some(line) = err.lines().last().map(str::trim).filter(|l| !l.is_empty()) {
-                    reasons.push(format!("{}: {line}", &name_for_err));
+                    reasons.push(format!("{}: {line}", name_for_err));
                 }
                 false
             }

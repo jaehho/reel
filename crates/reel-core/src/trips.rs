@@ -259,12 +259,8 @@ fn build_trip(cfg: &Config, dir: &Path, ledger: &Ledger) -> Trip {
     for p in &masters_v {
         match person_of(p, dir) {
             Some(person) if person == me => mine += 1,
-            Some(person) => {
-                if !contributors.contains(&person) {
-                    contributors.push(person);
-                }
-            }
-            None => {}
+            Some(person) if !contributors.contains(&person) => contributors.push(person),
+            _ => {}
         }
     }
     contributors.sort();
