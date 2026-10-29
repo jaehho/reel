@@ -16,9 +16,11 @@ Files:
 The `PKGBUILD` sources from `https://github.com/jaehho/reel.git`, so that repo
 must exist and be pushed before the package can build for anyone but you.
 
-## Test the build locally (no AUR, no GitHub)
+## Test the build locally (no AUR)
 
-Point the source at this working tree and build:
+`make package` at the repo root builds the pushed `main` from GitHub in a scratch copy of the recipe (makepkg writes `pkgver=` back into whatever recipe it runs) and moves only the finished package into `packaging/`, where git ignores it.
+
+To build this working tree instead, without GitHub, point the source at it:
 
 ```fish
 cd /tmp; rm -rf reel-pkgtest; mkdir reel-pkgtest; cd reel-pkgtest

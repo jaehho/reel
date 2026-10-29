@@ -34,6 +34,9 @@ ln -s "$here/reel-live" "$tmp/bin/reel"
 
 export MARKER="$tmp/marker"
 export NOTIFIED="$tmp/notified"
+# No bus: a background rebuild that fails after $tmp is gone would find
+# the real notify-send next on PATH.
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$tmp/no-bus"
 export REEL_SRC="$tmp/src"
 export PATH="$tmp/bin:$PATH"
 export XDG_STATE_HOME="$tmp/state"
@@ -105,6 +108,19 @@ grep -q '^built$' "$MARKER" || {
   echo "FAIL: did not kick a background rebuild; got $(cat "$MARKER")" >&2
   exit 1
 }
+
+# REEL_NO_REBUILD: run the binary, leave cargo alone.
+: >"$MARKER"
+REEL_NO_REBUILD=1 "$tmp/bin/reel" quiet >/dev/null 2>&1
+sleep 0.5
+grep -q '^args:quiet$' "$MARKER" || {
+  echo "FAIL: REEL_NO_REBUILD did not run the binary; got $(cat "$MARKER")" >&2
+  exit 1
+}
+if grep -q '^built$' "$MARKER"; then
+  echo "FAIL: REEL_NO_REBUILD still rebuilt" >&2
+  exit 1
+fi
 
 # After `make install`, the baked-in tree wins over $HOME/projects/reel,
 # and the sentinel must not have eaten the fallback check.

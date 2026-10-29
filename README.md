@@ -21,13 +21,7 @@ From a checkout, into `~/.local`, with no root and no package:
 make install
 ```
 
-This is how reel runs on the author's machine and what contributors use.
-The launcher runs the checkout's last release build and rebuilds the tree
-in the background, so edits arrive on the next launch; `make build`
-rebuilds by hand. The first launch has no build yet and builds before it
-opens. A failed build never replaces a running binary; its output is in
-`~/.local/state/reel-live.log`. `make uninstall` removes the launcher,
-its desktop entry and the icons; footage, config and logs stay.
+This is how reel runs on the author's machine and what contributors use. The launcher runs the checkout's last release build and rebuilds the tree in the background, so edits arrive on the next launch; `make build` rebuilds by hand, and `REEL_NO_REBUILD=1` skips the background rebuild for a script that calls `reel` often. The first launch has no build yet and builds before it opens. A failed build never replaces a running binary; its output is in `~/.local/state/reel-live.log`. `make uninstall` removes the launcher, its desktop entry and the icons; footage, config and logs stay.
 
 ## Run it (from source)
 
@@ -38,6 +32,9 @@ make dump     # print what the engine sees right now (trips + inserted card)
 make logs     # follow the app log
 make errors   # just the warnings and errors from it
 make build    # optimized release binary -> target/release/reel
+make lint     # clippy with warnings as errors, then cargo fmt --check
+make package  # the Arch package of the pushed main, into packaging/
+make help     # every target
 ```
 
 ### When something goes wrong

@@ -2,11 +2,14 @@
 # The frontend is static and embedded at compile time, so `cargo run` is all you
 # need to launch the app; npm/tauri-cli only come in for release bundling.
 
-.PHONY: run test test-live build install uninstall fmt clean dump logs errors perf
+.PHONY: help run test test-live lint build install uninstall package fmt clean dump logs errors perf reproxy
 
 PREFIX  ?= $(HOME)/.local
 DATADIR ?= $(or $(XDG_DATA_HOME),$(HOME)/.local/share)
 REEL_LOG := $(or $(XDG_STATE_HOME),$(HOME)/.local/state)/reel/log/reel.jsonl
+
+help: ## this list
+	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*## /\t/' | expand -t18
 
 run: ## launch the app (debug build)
 	cargo run -p reel-tauri
@@ -17,6 +20,10 @@ test: test-live ## engine + UI-logic tests — headless, fast, no GUI deps
 
 test-live: ## the install launcher never runs a failed build
 	scripts/test-reel-live
+
+lint: ## clippy with warnings as errors, then a format check
+	cargo clippy --workspace --all-targets -- -D warnings
+	cargo fmt --check
 
 logs: ## follow the app log (UI + engine, newest last)
 	@tail -n 50 -F $(REEL_LOG)
@@ -66,8 +73,20 @@ uninstall: ## remove the user install (footage, config and logs stay)
 	      $(DATADIR)/icons/hicolor/32x32/apps/reel.png
 	update-desktop-database $(DATADIR)/applications 2>/dev/null || true
 
-fmt:
+package: ## build the Arch package into packaging/ (in a scratch copy)
+	# makepkg writes the pkgver() result back into whatever recipe it
+	# runs (battery-log gotcha #7), so it gets a throwaway copy of the
+	# PKGBUILD and only the finished package moves back into packaging/.
+	# The recipe builds the pushed main from GitHub, not this tree.
+	tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	cp packaging/PKGBUILD "$$tmp/"; \
+	(cd "$$tmp" && makepkg -f) && \
+	mv "$$tmp"/*.pkg.tar.zst packaging/ && \
+	ls -1t packaging/*.pkg.tar.zst | head -1
+
+fmt: ## format the code
 	cargo fmt
 
-clean:
+clean: ## remove build output
 	cargo clean
