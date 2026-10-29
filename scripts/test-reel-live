@@ -34,6 +34,9 @@ ln -s "$here/reel-live" "$tmp/bin/reel"
 
 export MARKER="$tmp/marker"
 export NOTIFIED="$tmp/notified"
+# No bus: a background rebuild that fails after $tmp is gone would find
+# the real notify-send next on PATH.
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$tmp/no-bus"
 export REEL_SRC="$tmp/src"
 export PATH="$tmp/bin:$PATH"
 export XDG_STATE_HOME="$tmp/state"
