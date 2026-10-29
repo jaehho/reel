@@ -85,8 +85,8 @@ package: ## build the Arch package into packaging/ (in a scratch copy)
 	mv "$$tmp"/*.pkg.tar.zst packaging/ && \
 	ls -1t packaging/*.pkg.tar.zst | head -1
 
-fmt:
+fmt: ## format the code
 	cargo fmt
 
-clean:
+clean: ## remove build output
 	cargo clean
